@@ -4,6 +4,7 @@ from .qt_compat import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -12,6 +13,7 @@ from .qt_compat import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QListWidgetItem,
     QPushButton,
     QProgressBar,
@@ -27,6 +29,7 @@ from .qt_compat import (
     Signal,
 )
 from core.io.exporters import export_data_catalog
+from core.io.readers import read_shapefile_geometry
 from core.models import AnalysisParameters, AnalysisResult
 from core.project import ProjectStore
 
@@ -130,6 +133,44 @@ class FlowStep(QFrame):
         layout.addLayout(labels)
 
 
+class DataSelectDialog(QDialog):
+    """从已导入的数据目录中勾选要展示到工作台的数据。"""
+
+    def __init__(self, sources, selected, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择数据")
+        self.resize(380, 340)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("勾选要在工作台显示的数据（数据在「数据管理」页导入）："))
+        self.list = QListWidget()
+        self.sources = list(sources)
+        selected_paths = {s.path for s in selected}
+        for source in self.sources:
+            item = QListWidgetItem(f"{source.icon}  {source.name} · {source.data_type}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if source.path in selected_paths else Qt.CheckState.Unchecked)
+            self.list.addItem(item)
+        layout.addWidget(self.list)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("取消")
+        cancel.setObjectName("OutlineButton")
+        ok = QPushButton("确定")
+        ok.setObjectName("PrimaryButton")
+        cancel.clicked.connect(self.reject)
+        ok.clicked.connect(self.accept)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
+
+    def selected_sources(self):
+        result = []
+        for i, source in enumerate(self.sources):
+            if self.list.item(i).checkState() == Qt.CheckState.Checked:
+                result.append(source)
+        return result
+
+
 class WorkbenchPage(QWidget):
     runRequested = Signal(dict)
     statusMessage = Signal(str)
@@ -138,13 +179,14 @@ class WorkbenchPage(QWidget):
         super().__init__(parent)
         self.store = store
         self.latest_result = AnalysisResult()
+        self.display_sources = list(self.store.sources)
         self.source_body = None
-        self.selection_label = None
         self.bandwidth_value = None
         self.backend_combo = None
         self.x_combo = None
         self.y_combo = None
         self.map_canvas = None
+        self._map_source_path = None
         self._build()
 
     def _build(self):
@@ -162,10 +204,10 @@ class WorkbenchPage(QWidget):
         flow = QHBoxLayout()
         flow.setSpacing(0)
         for number, title, note, state in [
-            ("01", "数据准备", "3 个数据源已加载", "done"),
-            ("02", "空间配准", "坐标与尺度已统一", "done"),
-            ("03", "局部建模", "GWR 参数待运行", "current"),
-            ("04", "结果输出", "等待分析完成", "pending"),
+            ("01", "数据准备", "尚未加载数据源", "pending"),
+            ("02", "空间配准", "未开始", "pending"),
+            ("03", "局部建模", "未开始", "pending"),
+            ("04", "结果输出", "未开始", "pending"),
         ]:
             step = FlowStep(number, title, note, state)
             flow.addWidget(step, 1)
@@ -176,7 +218,7 @@ class WorkbenchPage(QWidget):
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(16)
         grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 4)
+        grid.setColumnStretch(1, 6)
         grid.setColumnStretch(2, 2)
         grid.addWidget(self._data_panel(), 0, 0)
         grid.addWidget(self._analysis_panel(), 0, 1)
@@ -187,89 +229,102 @@ class WorkbenchPage(QWidget):
         right_widget = QWidget()
         right_widget.setLayout(right_stack)
         grid.addWidget(right_widget, 0, 2)
-        grid.addWidget(self._metrics_panel(), 1, 0)
+        grid.addWidget(self._metrics_panel(), 1, 0, 1, 3)
         root.addLayout(grid)
 
     def _data_panel(self):
-        panel, body = panel_box("数据源", "多源数据集", "3 类")
-        self.source_body = body
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+        self.source_body = QVBoxLayout()
+        self.source_body.setSpacing(6)
+        root.addLayout(self.source_body)
+        select_button = QPushButton("＋  选择数据")
+        select_button.setObjectName("OutlineButton")
+        select_button.clicked.connect(self._select_data)
+        root.addWidget(select_button)
         self.refresh_sources()
-        import_button = QPushButton("↥  导入新数据")
-        import_button.setObjectName("OutlineButton")
-        import_button.clicked.connect(self._import_data)
-        body.addWidget(import_button)
         return panel
 
     def refresh_sources(self):
-        if not self.source_body:
+        if self.source_body is None:
             return
-        while self.source_body.count():
-            item = self.source_body.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        for source in self.store.sources:
+        clear_layout(self.source_body)
+        catalog_paths = {s.path for s in self.store.sources}
+        self.display_sources = [s for s in self.display_sources if s.path in catalog_paths]
+        for source in self.display_sources:
             row = QHBoxLayout()
-            row.setSpacing(9)
+            row.setSpacing(6)
             icon = QLabel(source.icon)
-            icon.setFixedSize(29, 29)
+            icon.setFixedSize(22, 22)
             icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            icon.setStyleSheet("color: #2d8c7c; background: #e3f3ef; border-radius: 6px; font-size: 15px;")
+            icon.setStyleSheet("color: #2d8c7c; background: #e3f3ef; border-radius: 4px; font-size: 12px;")
             row.addWidget(icon)
-            labels = QVBoxLayout()
-            labels.setSpacing(2)
-            name = QLabel(source.data_type)
+            name = QLabel(source.name)
             name.setStyleSheet("font-weight: 700;")
-            details = QLabel(f"{source.name} · {Path(source.path).name}")
-            details.setObjectName("Muted")
-            details.setWordWrap(True)
-            labels.addWidget(name)
-            labels.addWidget(details)
-            row.addLayout(labels, 1)
-            toggle = QCheckBox()
-            toggle.setChecked(source.status != "待检查")
-            row.addWidget(toggle)
+            name.setToolTip(self._source_tooltip_text(source))
+            row.addWidget(name, 1)
+            if source.path.lower().endswith(".shp"):
+                view_button = QPushButton("⌁")
+                view_button.setObjectName("GhostButton")
+                view_button.setFixedWidth(26)
+                view_button.setToolTip("加载到地图")
+                view_button.clicked.connect(lambda checked=False, s=source: self._load_shp_to_map(s.path))
+                row.addWidget(view_button)
+            delete_button = QPushButton("×")
+            delete_button.setObjectName("GhostButton")
+            delete_button.setFixedWidth(26)
+            delete_button.setToolTip("删除该数据（不删除磁盘文件）")
+            delete_button.clicked.connect(lambda checked=False, s=source: self._remove_source(s))
+            row.addWidget(delete_button)
             self.source_body.addLayout(row)
-            separator = QFrame()
-            separator.setFrameShape(QFrame.Shape.HLine)
-            separator.setStyleSheet("color: #edf1f1;")
-            self.source_body.addWidget(separator)
 
-    def _import_data(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择空间数据",
-            "",
-            "空间数据 (*.csv *.xlsx *.xls *.tif *.tiff *.gpkg *.shp *.geojson);;所有文件 (*.*)",
-        )
-        if path:
-            self.store.add_source(path)
+    @staticmethod
+    def _source_tooltip_text(source) -> str:
+        parts = [f"{source.data_type} · {source.records}"]
+        if source.geometry_type:
+            parts.append(f"几何：{source.geometry_type}")
+        if source.fields:
+            shown = source.fields[:12]
+            suffix = "" if len(source.fields) <= 12 else f" 等 {len(source.fields)} 个"
+            parts.append("字段：" + "、".join(shown) + suffix)
+        if source.warnings:
+            parts.append("提示：" + "；".join(source.warnings))
+        return "\n".join(parts)
+
+    def _select_data(self):
+        dialog = DataSelectDialog(self.store.sources, self.display_sources, self)
+        if dialog.exec():
+            self.display_sources = dialog.selected_sources()
             self.refresh_sources()
-            self.statusMessage.emit(f"已登记数据：{Path(path).name}")
+            self.statusMessage.emit(f"已选择 {len(self.display_sources)} 个数据")
+
+    def _load_shp_to_map(self, path):
+        geometry = read_shapefile_geometry(path)
+        if geometry["geometries"]:
+            self.map_canvas.load_shapes(geometry)
+            self._map_source_path = path
+            self.statusMessage.emit(f"已加载 {len(geometry['geometries']):,} 个几何要素到地图")
+        else:
+            self.statusMessage.emit("未能解析 SHP 几何（可能是不支持的几何类型）")
+
+    def _remove_source(self, source):
+        self.display_sources = [s for s in self.display_sources if s.path != source.path]
+        if self._map_source_path == source.path:
+            self.map_canvas.clear()
+            self._map_source_path = None
+        self.refresh_sources()
+        self.statusMessage.emit(f"已从工作台移除：{source.name}")
 
     def _metrics_panel(self):
-        panel, body = panel_box("评价指标", "全局一致性", "演示结果")
-        metrics = [("MAE", "平均绝对误差", "较上次 ↓ 12.4%", "8.42"),
-                   ("R", "相关系数", "显著正相关", "0.82"),
-                   ("RMSE", "均方根误差", "较上次 ↓ 6.8%", "13.67")]
-        for code, title, note, value in metrics:
-            row = QHBoxLayout()
-            badge = QLabel(code)
-            badge.setFixedSize(32, 25)
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setStyleSheet("color: #4977b8; background: #eef3fa; border-radius: 4px; font-size: 10px; font-weight: 700;")
-            row.addWidget(badge)
-            labels = QVBoxLayout()
-            labels.setSpacing(2)
-            labels.addWidget(QLabel(title))
-            note_label = QLabel(note)
-            note_label.setObjectName("Muted")
-            labels.addWidget(note_label)
-            row.addLayout(labels, 1)
-            value_label = QLabel(value)
-            value_label.setStyleSheet("color: #2d8c7c; font-size: 16px; font-weight: 700;")
-            row.addWidget(value_label)
-            body.addLayout(row)
+        panel, body = panel_box("评价指标", "全局一致性")
+        empty = QLabel("暂无分析结果")
+        empty.setObjectName("Muted")
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setStyleSheet("padding: 24px 0;")
+        body.addWidget(empty)
         return panel
 
     def _analysis_panel(self):
@@ -291,17 +346,31 @@ class WorkbenchPage(QWidget):
         toolbar.addWidget(reset)
         body.addLayout(toolbar)
         mode_row = QHBoxLayout()
-        mode_row.addStretch()
         map_button = QPushButton("◫ 地图")
         map_button.setObjectName("OutlineButton")
         scatter_button = QPushButton("⌁ 散点图")
         scatter_button.setObjectName("GhostButton")
         mode_row.addWidget(map_button)
         mode_row.addWidget(scatter_button)
+        mode_row.addStretch()
+        zoom_out = QPushButton("－")
+        zoom_out.setObjectName("GhostButton")
+        zoom_out.setFixedWidth(30)
+        zoom_out.setToolTip("缩小")
+        zoom_in = QPushButton("＋")
+        zoom_in.setObjectName("GhostButton")
+        zoom_in.setFixedWidth(30)
+        zoom_in.setToolTip("放大")
+        reset_map = QPushButton("⟲")
+        reset_map.setObjectName("GhostButton")
+        reset_map.setFixedWidth(30)
+        reset_map.setToolTip("复位视图")
+        mode_row.addWidget(zoom_out)
+        mode_row.addWidget(zoom_in)
+        mode_row.addWidget(reset_map)
         body.addLayout(mode_row)
         self.preview_stack = QStackedWidget()
         self.map_canvas = MapCanvas()
-        self.map_canvas.selectedChanged.connect(self._update_selection)
         self.preview_stack.addWidget(self.map_canvas)
         scatter = QLabel("散点图画布接口已预留\n后续接入 Matplotlib / PyQtGraph")
         scatter.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -311,12 +380,12 @@ class WorkbenchPage(QWidget):
         body.addWidget(self.preview_stack, 1)
         map_button.clicked.connect(lambda: self.preview_stack.setCurrentIndex(0))
         scatter_button.clicked.connect(lambda: self.preview_stack.setCurrentIndex(1))
-        legend = QLabel("● 高一致性　　● 中等差异　　● 显著差异")
-        legend.setObjectName("Muted")
-        body.addWidget(legend)
-        self.selection_label = QLabel("当前选中样本 · ID 0018　江汉区 / 唐家墩街道　人口 65　夜光 85　局部 R² 0.86")
-        self.selection_label.setStyleSheet("padding: 10px; color: #356d63; background: #f1f8f5; border: 1px solid #dbece7; border-radius: 5px;")
-        body.addWidget(self.selection_label)
+        zoom_out.clicked.connect(self.map_canvas.zoom_out)
+        zoom_in.clicked.connect(self.map_canvas.zoom_in)
+        reset_map.clicked.connect(self.map_canvas.reset_view)
+        hint = QLabel("滚轮缩放 · 拖拽平移 · 双击复位")
+        hint.setObjectName("Muted")
+        body.addWidget(hint)
         return panel
 
     def _parameter_panel(self):
@@ -377,11 +446,6 @@ class WorkbenchPage(QWidget):
             body.addLayout(row)
         return panel
 
-    def _update_selection(self, index):
-        self.selection_label.setText(
-            f"当前选中样本 · ID {index + 1:04d}　江汉区 / 唐家墩街道　人口 65　夜光 85　局部 R² 0.86"
-        )
-
     def _reset_view(self):
         self.x_combo.setCurrentIndex(0)
         self.y_combo.setCurrentIndex(0)
@@ -422,7 +486,7 @@ class DataPage(QWidget):
         heading, import_button = page_heading("DATA CATALOG", "数据管理", "统一登记多源数据的来源、空间范围、坐标系与质量状态。", "↥ 导入数据")
         root.addLayout(heading)
         import_button.clicked.connect(self.import_data)
-        panel, body = panel_box("DATASETS · 03", "项目数据目录", "可导出")
+        panel, body = panel_box("DATASETS", "项目数据目录", "可导出")
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["数据集", "类型", "空间范围", "坐标系", "记录 / 分辨率", "状态", "路径"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -431,10 +495,17 @@ class DataPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setMinimumHeight(310)
         body.addWidget(self.table)
+        actions = QHBoxLayout()
+        delete_button = QPushButton("删除选中")
+        delete_button.setObjectName("OutlineButton")
+        delete_button.clicked.connect(self.delete_selected)
         export_button = QPushButton("↓ 导出数据清单")
         export_button.setObjectName("OutlineButton")
         export_button.clicked.connect(self.export_data)
-        body.addWidget(export_button, alignment=Qt.AlignmentFlag.AlignRight)
+        actions.addWidget(delete_button)
+        actions.addWidget(export_button)
+        actions.addStretch()
+        body.addLayout(actions)
         root.addWidget(panel)
         note = QLabel("ⓘ  数据质量检查接口已预留。真实导入后可在 core/io 中补充缺失值、坐标系和空间范围检查。")
         note.setStyleSheet("padding: 13px; color: #6f8f88; background: #eef6f4; border: 1px solid #d7eae5; border-radius: 7px;")
@@ -447,20 +518,60 @@ class DataPage(QWidget):
         for source in self.store.sources:
             row = self.table.rowCount()
             self.table.insertRow(row)
-            values = [source.name, source.data_type, source.extent, source.crs, source.records, source.status, source.path]
+            data_type = source.data_type
+            if source.geometry_type:
+                data_type = f"{source.data_type} · {source.geometry_type}"
+            values = [source.name, data_type, source.extent, source.crs, source.records, source.status, source.path]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 self.table.setItem(row, column, item)
-        widths = [145, 85, 120, 100, 105, 85, 280]
+            tip = self._source_tooltip(source)
+            if tip:
+                self.table.item(row, 0).setToolTip(tip)
+        widths = [145, 100, 150, 120, 110, 85, 280]
         for index, width in enumerate(widths):
             self.table.setColumnWidth(index, width)
 
+    @staticmethod
+    def _source_tooltip(source) -> str:
+        parts = []
+        if source.fields:
+            shown = source.fields[:20]
+            suffix = "" if len(source.fields) <= 20 else f" 等 {len(source.fields)} 个"
+            parts.append("字段：" + "、".join(shown) + suffix)
+        if source.geometry_type:
+            parts.append("几何类型：" + source.geometry_type)
+        if source.warnings:
+            parts.append("提示：" + "；".join(source.warnings))
+        return "\n".join(parts)
+
     def import_data(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择空间数据", "", "空间数据 (*.csv *.xlsx *.xls *.tif *.tiff *.gpkg *.shp *.geojson);;所有文件 (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择空间数据", "", "空间数据 (*.csv *.xlsx *.xls *.xlsm *.json *.geojson *.shp *.gpkg *.tif *.tiff *.asc *.img);;所有文件 (*.*)")
         if path:
-            self.store.add_source(path)
+            source = self.store.add_source(path)
             self.refresh()
-            self.statusMessage.emit(f"已登记数据：{Path(path).name}")
+            self.statusMessage.emit(source.summary())
+
+    def delete_selected(self):
+        rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
+        if not rows:
+            self.statusMessage.emit("请先在表格中选择要删除的数据行")
+            return
+        names = [self.store.sources[row].name for row in rows if row < len(self.store.sources)]
+        reply = QMessageBox.question(
+            self,
+            "删除数据",
+            f"确定移除选中的 {len(rows)} 条数据吗？\n（不会删除磁盘上的文件）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for row in rows:
+            if row < len(self.store.sources):
+                self.store.remove_source(self.store.sources[row].path)
+        self.refresh()
+        self.statusMessage.emit(f"已移除：{'、'.join(names)}")
 
     def export_data(self):
         path, _ = QFileDialog.getSaveFileName(self, "导出数据清单", "data_catalog.csv", "CSV 文件 (*.csv)")

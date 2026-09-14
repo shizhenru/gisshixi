@@ -16,7 +16,9 @@ def load_chinese_font(app):
             font_id = QFontDatabase.addApplicationFont(str(candidate))
             families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
             if families:
-                app.setFont(QFont(families[0], 10))
+                font = QFont(families[0])
+                font.setPixelSize(13)
+                app.setFont(font)
                 return families[0]
     return ""
 

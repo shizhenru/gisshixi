@@ -12,6 +12,21 @@ class DataSource:
     status: str = "待检查"
     records: str = "-"
     icon: str = "▤"
+    fields: list[str] = field(default_factory=list)
+    geometry_type: str = ""
+    warnings: list[str] = field(default_factory=list)
+    reader: str = ""
+
+    def summary(self) -> str:
+        """一行人可读的读取结果摘要，用于状态栏提示。"""
+        if self.reader == "fallback":
+            return f"未读取：{self.name}"
+        parts = [f"已读取 {self.name}", self.records]
+        if self.fields:
+            parts.append(f"{len(self.fields)} 字段")
+        if self.geometry_type:
+            parts.append(self.geometry_type)
+        return " · ".join(parts)
 
 
 @dataclass

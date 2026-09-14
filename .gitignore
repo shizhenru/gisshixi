@@ -1,0 +1,11 @@
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 运行时数据
+.runtime/
+
+# IDE
+.vscode/
+.idea/

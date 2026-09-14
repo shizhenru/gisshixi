@@ -1,11 +1,12 @@
 try:
     from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, QThread, Qt, Signal, Slot
-    from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF
+    from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
         QCheckBox,
         QComboBox,
+        QDialog,
         QDoubleSpinBox,
         QFileDialog,
         QFrame,
@@ -36,12 +37,13 @@ try:
     QT_BINDING = "PySide6"
 except ImportError:
     from PyQt6.QtCore import QObject, QPointF, QRectF, QSettings, QThread, Qt, pyqtSignal as Signal, pyqtSlot as Slot
-    from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF
+    from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
     from PyQt6.QtWidgets import (
         QApplication,
         QAbstractItemView,
         QCheckBox,
         QComboBox,
+        QDialog,
         QDoubleSpinBox,
         QFileDialog,
         QFrame,

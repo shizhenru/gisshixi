@@ -68,6 +68,13 @@ class SpatialValidationWindow(QMainWindow):
         self.nav_buttons = {}
         self._build()
 
+    def closeEvent(self, event):
+        """关闭窗口前先安全结束后台分析线程，避免 QThread 在运行中被销毁。"""
+        if self._analysis_thread is not None and self._analysis_thread.isRunning():
+            self._analysis_thread.quit()
+            self._analysis_thread.wait(2000)
+        event.accept()
+
     def _build(self):
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -113,6 +120,7 @@ class SpatialValidationWindow(QMainWindow):
         self.setCentralWidget(root)
         self._connect_signals()
         self.navigate("workspace")
+        self._refresh_sidebar()
 
     def _top_bar(self):
         top = QFrame()
@@ -155,9 +163,9 @@ class SpatialValidationWindow(QMainWindow):
     def _sidebar(self):
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(232)
+        sidebar.setFixedWidth(190)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(16, 24, 16, 20)
+        layout.setContentsMargins(12, 24, 12, 20)
         layout.setSpacing(6)
         project_label = QLabel("当前项目")
         project_label.setObjectName("Muted")
@@ -175,7 +183,7 @@ class SpatialValidationWindow(QMainWindow):
         layout.addSpacing(12)
         nav_items = [
             ("workspace", "▦  工作台", ""),
-            ("data", "↥  数据管理", "3"),
+            ("data", "↥  数据管理", ""),
             ("preprocess", "☷  预处理", ""),
             ("analysis", "◫  空间分析", ""),
             ("results", "⌁  结果与报告", ""),
@@ -197,9 +205,9 @@ class SpatialValidationWindow(QMainWindow):
         health_layout.setSpacing(7)
         health_head = QHBoxLayout()
         health_head.addWidget(QLabel("数据集状态"))
-        ready = QLabel("已就绪")
-        ready.setStyleSheet("color: #2d8c7c; font-weight: 700;")
-        health_head.addWidget(ready, alignment=Qt.AlignmentFlag.AlignRight)
+        self.health_ready_label = QLabel("待导入")
+        self.health_ready_label.setStyleSheet("color: #849295; font-weight: 700;")
+        health_head.addWidget(self.health_ready_label, alignment=Qt.AlignmentFlag.AlignRight)
         health_layout.addLayout(health_head)
         progress = QFrame()
         progress.setFixedHeight(5)
@@ -208,7 +216,9 @@ class SpatialValidationWindow(QMainWindow):
         progress_bar.setGeometry(0, 0, 138, 5)
         progress_bar.setStyleSheet("background: #2d8c7c; border-radius: 3px;")
         health_layout.addWidget(progress)
-        health_layout.addWidget(QLabel("3 类数据 · 12,486 条记录"))
+        self.health_count_label = QLabel("暂无数据源")
+        self.health_count_label.setObjectName("Muted")
+        health_layout.addWidget(self.health_count_label)
         layout.addWidget(health)
         settings_button = QPushButton("⚙  系统设置")
         settings_button.setObjectName("GhostButton")
@@ -228,6 +238,10 @@ class SpatialValidationWindow(QMainWindow):
     def navigate(self, key):
         page = self.pages[key]
         self.stack.setCurrentWidget(page)
+        if key == "data":
+            self.data_page.refresh()
+        elif key == "workspace":
+            self.workbench_page.refresh_sources()
         for name, button in self.nav_buttons.items():
             button.setProperty("active", name == key)
             button.style().unpolish(button)
@@ -235,6 +249,20 @@ class SpatialValidationWindow(QMainWindow):
 
     def set_status(self, message):
         self.status_label.setText(message)
+        self._refresh_sidebar()
+
+    def _refresh_sidebar(self):
+        if not hasattr(self, "health_count_label"):
+            return
+        count = len(self.store.sources)
+        if count:
+            self.health_count_label.setText(f"已导入 {count} 个数据源")
+            self.health_ready_label.setText("已就绪")
+            self.health_ready_label.setStyleSheet("color: #2d8c7c; font-weight: 700;")
+        else:
+            self.health_count_label.setText("暂无数据源")
+            self.health_ready_label.setText("待导入")
+            self.health_ready_label.setStyleSheet("color: #849295; font-weight: 700;")
 
     def _set_rscript_path(self, path):
         self.settings.setValue("rscript_path", path)
