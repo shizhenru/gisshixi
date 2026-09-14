@@ -32,6 +32,7 @@ from core.io.exporters import export_data_catalog
 from core.io.readers import read_shapefile_geometry
 from core.models import AnalysisParameters, AnalysisResult
 from core.project import ProjectStore
+from core.raster_processing import RasterPreprocessor, collect_raster_sources
 
 from .widgets import MapCanvas, MetricCard
 
@@ -395,7 +396,7 @@ class WorkbenchPage(QWidget):
         form.setVerticalSpacing(8)
         form.addWidget(QLabel("算法后端"), 0, 0)
         self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["Python 占位算法", "R 占位算法", "混合调度（预留）"])
+        self.backend_combo.addItems(["Python 占位算法", "R 占位算法", "栅格 R / terra", "混合调度（预留）"])
         form.addWidget(self.backend_combo, 0, 1)
         form.addWidget(QLabel("核函数"), 1, 0)
         kernel = QComboBox()
@@ -453,7 +454,7 @@ class WorkbenchPage(QWidget):
         self.statusMessage.emit("已重置地图与模型参数")
 
     def collect_parameters(self):
-        return AnalysisParameters(
+        parameters = AnalysisParameters(
             dependent_variable=self.y_combo.currentText(),
             independent_variable=self.x_combo.currentText(),
             kernel=self.kernel_combo.currentText(),
@@ -462,6 +463,12 @@ class WorkbenchPage(QWidget):
             distance_metric=self.distance_combo.currentText(),
             backend=self.backend_combo.currentText(),
         ).to_dict()
+        parameters.update({
+            "analysis_type": "raster" if self.backend_combo.currentText().startswith("栅格") else "attribute",
+            "window_size": 5,
+            "scatter_max_points": 50000,
+        })
+        return parameters
 
     def set_running(self, running: bool):
         self.sender_button_enabled = not running
@@ -583,8 +590,12 @@ class DataPage(QWidget):
 class PreprocessPage(QWidget):
     statusMessage = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, store: ProjectStore, parent=None):
         super().__init__(parent)
+        self.store = store
+        self.preprocessor = RasterPreprocessor(store.project_dir)
+        self.progress = None
+        self.preview_info = None
         self._build()
 
     def _build(self):
@@ -620,26 +631,51 @@ class PreprocessPage(QWidget):
             status_label.setObjectName("Muted")
             row.addWidget(status_label)
             left_body.addLayout(row)
-        progress = QProgressBar()
-        progress.setValue(60)
-        left_body.addWidget(progress)
+        self.progress = QProgressBar()
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        left_body.addWidget(self.progress)
         run = QPushButton("▶  执行待处理步骤")
         run.setObjectName("PrimaryButton")
-        run.clicked.connect(lambda: self.statusMessage.emit("预处理任务已加入队列，等待真实数据处理器接入"))
+        run.clicked.connect(self.execute)
         left_body.addWidget(run)
         grid.addWidget(left, 0, 0)
         right, right_body = panel_box("PREVIEW", "配准预览", "500 m")
         canvas = MapCanvas()
         right_body.addWidget(canvas, 1)
-        preview_info = QLabel("目标坐标系　CGCS2000 / 3°分带\n统一分析单元　500 m 网格\n研究区　武汉市域 · 8,221 km²")
-        preview_info.setObjectName("Muted")
-        preview_info.setStyleSheet("line-height: 1.7;")
-        right_body.addWidget(preview_info)
+        self.preview_info = QLabel("等待导入至少两个栅格数据集")
+        self.preview_info.setObjectName("Muted")
+        self.preview_info.setWordWrap(True)
+        right_body.addWidget(self.preview_info)
         grid.addWidget(right, 0, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         root.addLayout(grid)
         root.addStretch()
+
+    def execute(self):
+        rasters = collect_raster_sources(self.store.sources)
+        if len(rasters) < 2:
+            self.statusMessage.emit("请先在数据管理中导入至少两个栅格数据集")
+            return
+        self.progress.setRange(0, 0)
+        self.statusMessage.emit("正在统一栅格坐标系、分辨率和范围...")
+        try:
+            result = self.preprocessor.preprocess(rasters)
+        except Exception as exc:
+            self.progress.setRange(0, 100)
+            self.statusMessage.emit(f"栅格预处理失败：{exc}")
+            return
+        self.progress.setRange(0, 100)
+        if result.status == "success":
+            self.progress.setValue(100)
+            checks = "\n".join(result.checks or [])
+            self.preview_info.setText(
+                f"已统一 {len(result.processed or [])} 个栅格\n"
+                f"参考数据：{Path(result.reference).stem}\n"
+                f"输出目录：{result.output_dir}\n{checks}"
+            )
+        self.statusMessage.emit(result.message)
 
 
 class AnalysisPage(QWidget):

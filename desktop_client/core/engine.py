@@ -4,6 +4,7 @@ from typing import Any
 
 from .algorithms.python_runner import PythonRunner
 from .algorithms.r_runner import RRunner
+from .algorithms.raster_runner import RasterTerraRunner
 from .models import AnalysisResult
 
 
@@ -16,12 +17,24 @@ class AnalysisEngine:
         stubs = root / "core" / "algorithms" / "stubs"
         self.python_runner = PythonRunner(stubs / "gwr_placeholder.py")
         self.r_runner = RRunner(stubs / "gwr_placeholder.R", rscript_path)
+        raster_script = root.parent / "栅格数据算法" / "desktop_raster_terra_analysis.R"
+        self.raster_runner = RasterTerraRunner(raster_script, rscript_path)
 
     def run(self, parameters: dict[str, Any]) -> AnalysisResult:
         output_path = self.project_dir / ".runtime" / "analysis_result.json"
         output_path.parent.mkdir(exist_ok=True)
         backend = parameters.get("backend", "Python 占位算法")
         try:
+            if parameters.get("analysis_type") == "raster" or backend.startswith("栅格"):
+                payload = self.raster_runner.run(parameters, output_path)
+                return AnalysisResult(
+                    status=payload.get("status", "success"),
+                    engine=payload.get("engine", "R / terra"),
+                    metrics={k: str(v) for k, v in payload.get("metrics", {}).items()},
+                    message=payload.get("message", "栅格分析完成"),
+                    output_path=str(output_path),
+                    local_values=payload.get("local_values", []),
+                )
             if backend.startswith("混合"):
                 return AnalysisResult(
                     status="ready",

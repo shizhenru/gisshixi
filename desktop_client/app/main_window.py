@@ -31,6 +31,7 @@ from core.engine import AnalysisEngine
 from core.io.exporters import export_report
 from core.models import AnalysisResult
 from core.project import ProjectStore
+from core.raster_processing import RasterPreprocessor
 
 
 class AnalysisWorker(QObject):
@@ -95,7 +96,7 @@ class SpatialValidationWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.workbench_page = WorkbenchPage(self.store)
         self.data_page = DataPage(self.store)
-        self.preprocess_page = PreprocessPage()
+        self.preprocess_page = PreprocessPage(self.store)
         self.analysis_page = AnalysisPage()
         self.results_page = ResultsPage(self.latest_result)
         self.settings_page = SettingsPage()
@@ -267,12 +268,30 @@ class SpatialValidationWindow(QMainWindow):
     def _set_rscript_path(self, path):
         self.settings.setValue("rscript_path", path)
         self.engine.r_runner.rscript_path = path
+        self.engine.raster_runner.rscript_path = path
         self.set_status(f"已保存 Rscript 路径：{Path(path).name}")
 
     def run_analysis(self, parameters):
         if self._analysis_thread is not None:
             self.set_status("已有分析任务正在运行")
             return
+        if parameters.get("analysis_type") == "raster":
+            raster_paths = [
+                source.path
+                for source in self.store.sources
+                if "栅格" in source.data_type
+                or Path(source.path).suffix.lower() in {".tif", ".tiff", ".img", ".asc"}
+            ]
+            parameters = dict(parameters)
+            manifest = RasterPreprocessor(self.store.project_dir).latest_manifest()
+            aligned = (manifest or {}).get("processed", [])
+            aligned_by_source = {item.get("source_path"): item.get("aligned_path") for item in aligned}
+            parameters["raster_paths"] = [
+                aligned_by_source.get(path, path) for path in raster_paths
+            ]
+            if len(raster_paths) < 2:
+                self.set_status("栅格分析至少需要两个已导入的栅格数据集")
+                return
         self.latest_parameters = parameters
         self.set_status(f"正在运行 {parameters.get('backend', '算法')}...")
         self._analysis_thread = QThread(self)
