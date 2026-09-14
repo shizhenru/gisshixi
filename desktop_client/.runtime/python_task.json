@@ -1,0 +1,9 @@
+{
+  "dependent_variable": "夜光遥感",
+  "independent_variable": "人口密度",
+  "kernel": "双平方核",
+  "bandwidth": 0.62,
+  "bandwidth_mode": "自适应带宽",
+  "distance_metric": "投影坐标距离（米）",
+  "backend": "Python 占位算法"
+}
