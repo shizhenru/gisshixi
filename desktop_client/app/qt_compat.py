@@ -1,6 +1,6 @@
 try:
-    from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, QThread, Qt, Signal, Slot
-    from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
+    from PySide6.QtCore import QMimeData, QObject, QPointF, QRectF, QSettings, QThread, Qt, Signal, Slot
+    from PySide6.QtGui import QColor, QDrag, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -27,17 +27,19 @@ try:
         QSlider,
         QSpinBox,
         QStackedWidget,
+        QTabWidget,
         QTableWidget,
         QTableWidgetItem,
         QTextEdit,
+        QToolTip,
         QVBoxLayout,
         QSpacerItem,
         QWidget,
     )
     QT_BINDING = "PySide6"
 except ImportError:
-    from PyQt6.QtCore import QObject, QPointF, QRectF, QSettings, QThread, Qt, pyqtSignal as Signal, pyqtSlot as Slot
-    from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
+    from PyQt6.QtCore import QMimeData, QObject, QPointF, QRectF, QSettings, QThread, Qt, pyqtSignal as Signal, pyqtSlot as Slot
+    from PyQt6.QtGui import QColor, QDrag, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
     from PyQt6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -64,9 +66,11 @@ except ImportError:
         QSlider,
         QSpinBox,
         QStackedWidget,
+        QTabWidget,
         QTableWidget,
         QTableWidgetItem,
         QTextEdit,
+        QToolTip,
         QVBoxLayout,
         QSpacerItem,
         QWidget,

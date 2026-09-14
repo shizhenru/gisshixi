@@ -59,3 +59,5 @@ class AnalysisResult:
     message: str = "等待运行分析"
     output_path: str = ""
     local_values: list[float] = field(default_factory=list)
+    local_columns: dict = field(default_factory=dict)
+    output_shp: str = ""

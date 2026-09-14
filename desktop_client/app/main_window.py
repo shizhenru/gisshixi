@@ -75,6 +75,7 @@ class SpatialValidationWindow(QMainWindow):
         self.latest_parameters = {}
         self._analysis_thread = None
         self._analysis_worker = None
+        self._last_analysis_shp_path = None
         self.nav_buttons = {}
         self._build()
 
@@ -104,7 +105,7 @@ class SpatialValidationWindow(QMainWindow):
         self.preprocess_page = PreprocessPage(self.store)
         self.analysis_page = AnalysisPage(self.store)
         self.results_page = ResultsPage(self.latest_result)
-        self.settings_page = SettingsPage()
+        self.settings_page = SettingsPage(rscript_path=self.settings.value("rscript_path", ""))
         self.pages = {
             "workspace": self.workbench_page,
             "data": self.data_page,
@@ -179,6 +180,7 @@ class SpatialValidationWindow(QMainWindow):
     def _set_rscript_path(self, path):
         self.settings.setValue("rscript_path", path)
         self.engine.r_runner.rscript_path = path
+        self.engine.r_gwr_runner.rscript_path = path
         self.engine.raster_runner.rscript_path = path
         self.set_status(f"已保存 Rscript 路径：{Path(path).name}")
 
@@ -186,6 +188,7 @@ class SpatialValidationWindow(QMainWindow):
         if self._analysis_thread is not None:
             self.set_status("已有分析任务正在运行")
             return
+        self._last_analysis_shp_path = None
         if parameters.get("analysis_type") == "raster":
             raster_paths = [
                 source.path for source in self.store.sources
@@ -200,6 +203,18 @@ class SpatialValidationWindow(QMainWindow):
             aligned = (manifest or {}).get("processed", [])
             aligned_by_source = {item.get("source_path"): item.get("aligned_path") for item in aligned}
             parameters["raster_paths"] = [aligned_by_source.get(path, path) for path in raster_paths]
+        elif parameters.get("analysis_type") == "attribute":
+            shp_path = next(
+                (source.path for source in self.store.sources
+                 if Path(source.path).suffix.lower() in {".shp", ".gpkg", ".geojson"}),
+                None,
+            )
+            if not shp_path:
+                self.set_status("属性 GWR 分析需要先导入一个矢量数据（SHP/GeoPackage/GeoJSON）")
+                return
+            parameters = dict(parameters)
+            parameters["shp_path"] = shp_path
+            self._last_analysis_shp_path = shp_path
         self.latest_parameters = parameters
         self.set_status(f"正在运行 {parameters.get('backend', '算法')}...")
         self._analysis_thread = QThread(self)
@@ -218,7 +233,7 @@ class SpatialValidationWindow(QMainWindow):
     def _analysis_finished(self, result):
         self.latest_result = result
         self.results_page.update_result(result)
-        self.workbench_page.update_result(result)
+        self.workbench_page.update_result(result, self._last_analysis_shp_path)
         if result.status == "error":
             self.set_status(f"分析失败：{result.message}")
         else:

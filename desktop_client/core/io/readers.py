@@ -681,3 +681,202 @@ def _read_esri_ascii(path: Path) -> dict[str, Any]:
         return _base("待读取栅格范围", "待识别", "-", "asc", warnings=["ASCII Grid 头解析失败"])
     extent = f"{xll:.4f}, {yll:.4f} ~ {xll + ncols * cellsize:.4f}, {yll + nrows * cellsize:.4f}"
     return _base(extent, "投影坐标（见 .prj 或用户定义）", f"{ncols}×{nrows} · {cellsize:g} m", "asc")
+
+
+# --------------------------------------------------------------------------- #
+# 属性表读取（工作台属性表拖放展示用）
+# --------------------------------------------------------------------------- #
+def read_attributes(path: str, limit: int = 0) -> dict[str, Any]:
+    """读取数据文件的属性表：字段名 + 记录值。
+
+    返回 {"fields": [str], "rows": [[value, ...], ...], "row_count": int, "truncated": bool}
+    limit=0 表示读取全部；>0 表示最多读取前 limit 行，truncated 标记是否被截断。
+    任何异常都降级为空表，不向上抛。
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+    suffix = file_path.suffix.lower()
+    try:
+        if suffix == ".csv":
+            return _read_csv_attributes(file_path, limit)
+        if suffix in {".json", ".geojson"}:
+            return _read_geojson_attributes(file_path, limit)
+        if suffix in {".xlsx", ".xlsm"}:
+            return _read_excel_attributes(file_path, limit)
+        if suffix == ".shp":
+            return _read_shp_attributes(file_path, limit)
+    except Exception:  # noqa: BLE001 - 属性表读取失败不应拖垮界面
+        pass
+    return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+
+
+def _read_csv_attributes(path: Path, limit: int) -> dict[str, Any]:
+    encoding = _detect_encoding(path)
+    with path.open("r", encoding=encoding, newline="", errors="replace") as stream:
+        reader = _csv.reader(stream)
+        header = next(reader, None)
+        if header is None:
+            return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+        fields = [h.strip() for h in header if h is not None]
+        rows: list[list] = []
+        truncated = False
+        for line in reader:
+            if not line or (len(line) == 1 and line[0] == ""):
+                continue
+            if limit and len(rows) >= limit:
+                truncated = True
+                break
+            rows.append(_pad(list(line), len(fields)))
+    return {"fields": fields, "rows": rows, "row_count": len(rows), "truncated": truncated}
+
+
+def _read_geojson_attributes(path: Path, limit: int) -> dict[str, Any]:
+    data = _json.loads(path.read_text(encoding="utf-8"))
+    features: list[dict] = []
+    if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+        features = data.get("features", []) or []
+    elif isinstance(data, dict) and data.get("type") == "Feature":
+        features = [data]
+
+    fields: list[str] = []
+    seen: set[str] = set()
+    for feat in features[:500]:
+        props = feat.get("properties") if isinstance(feat, dict) else None
+        if isinstance(props, dict):
+            for key in props:
+                if key not in seen:
+                    seen.add(key)
+                    fields.append(key)
+
+    total = len(features)
+    take = total if limit == 0 else min(total, limit)
+    rows: list[list] = []
+    for feat in features[:take]:
+        props = feat.get("properties") if isinstance(feat, dict) else None
+        rows.append([props.get(f) if isinstance(props, dict) else None for f in fields])
+    return {"fields": fields, "rows": rows, "row_count": len(rows),
+            "truncated": limit > 0 and total > take}
+
+
+def _read_excel_attributes(path: Path, limit: int) -> dict[str, Any]:
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    iterator = ws.iter_rows(values_only=True)
+    header = next(iterator, None)
+    if header is None:
+        wb.close()
+        return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+    fields = [str(h) if h is not None else "" for h in header]
+    rows: list[list] = []
+    truncated = False
+    for row in iterator:
+        if limit and len(rows) >= limit:
+            truncated = True
+            break
+        if row:
+            rows.append(list(row))
+    wb.close()
+    return {"fields": fields, "rows": rows, "row_count": len(rows), "truncated": truncated}
+
+
+def _read_shp_attributes(shp_path: Path, limit: int) -> dict[str, Any]:
+    dbf = shp_path.with_suffix(".dbf")
+    if not dbf.exists():
+        return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+    raw = dbf.read_bytes()
+    encoding = _dbf_encoding(dbf, raw)
+    return _parse_dbf_records(raw, encoding, limit)
+
+
+def _dbf_encoding(dbf_path: Path, raw: bytes) -> str:
+    cpg = dbf_path.with_suffix(".cpg")
+    if cpg.exists():
+        name = cpg.read_text(encoding="utf-8", errors="replace").strip().lower()
+        if "utf-8" in name or name in {"65001", "utf8"}:
+            return "utf-8"
+        if name in {"gbk", "gb2312", "936", "cp936", "gb18030", "54936"}:
+            return "gb18030"
+    sample = raw[32:32 + 4096]
+    try:
+        sample.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        return "gb18030"
+
+
+def _parse_dbf_records(raw: bytes, encoding: str, limit: int) -> dict[str, Any]:
+    if len(raw) < 33:
+        return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+    total = struct.unpack_from("<i", raw, 4)[0]
+    header_size = struct.unpack_from("<H", raw, 8)[0]
+    record_size = struct.unpack_from("<H", raw, 10)[0]
+
+    fields: list[tuple[str, str, int, int]] = []  # (name, type, length, decimals)
+    offset = 32
+    while offset + 32 <= header_size and raw[offset] != 0x0D:
+        name = raw[offset:offset + 11].split(b"\x00")[0].decode("ascii", "replace").strip()
+        ftype = chr(raw[offset + 11])
+        flen = raw[offset + 16]
+        fdec = raw[offset + 17]
+        if name:
+            fields.append((name, ftype, flen, fdec))
+        offset += 32
+    if not fields:
+        return {"fields": [], "rows": [], "row_count": 0, "truncated": False}
+
+    names = [f[0] for f in fields]
+    data_start = header_size
+    take = total if limit == 0 else min(total, limit)
+    rows: list[list] = []
+    for r in range(take):
+        rec_start = data_start + r * record_size
+        if rec_start + record_size > len(raw):
+            break
+        rec = raw[rec_start + 1:rec_start + record_size]  # 跳过首字节删除标记
+        pos = 0
+        values = []
+        for _name, ftype, flen, fdec in fields:
+            seg = rec[pos:pos + flen]
+            pos += flen
+            values.append(_parse_dbf_value(seg, ftype, fdec, encoding))
+        rows.append(values)
+    return {"fields": names, "rows": rows, "row_count": len(rows),
+            "truncated": limit > 0 and total > take}
+
+
+def _parse_dbf_value(seg: bytes, ftype: str, fdec: int, encoding: str):
+    if ftype == "C":
+        return seg.decode(encoding, "replace").rstrip(" \x00")
+    if ftype in ("N", "F"):
+        text = seg.decode("ascii", "replace").strip()
+        if not text or text in ("*", ".") or text.strip("*") == "":
+            return None
+        try:
+            num = float(text)
+        except ValueError:
+            return None  # 非数值内容（如 **** 占位）视为缺失
+        if fdec == 0 and num == int(num):
+            return int(num)
+        return num
+    if ftype == "D":
+        text = seg.decode("ascii", "replace").strip()
+        if len(text) == 8 and text.isdigit():
+            return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+        return text
+    if ftype == "L":
+        ch = seg[:1].decode("ascii", "replace").upper()
+        return ch if ch in ("T", "F", "Y", "N") else None
+    if ftype == "I":
+        if len(seg) == 4:
+            return struct.unpack("<i", seg)[0]
+        return seg.decode("ascii", "replace").strip()
+    if ftype == "B":
+        if len(seg) == 8:
+            return struct.unpack("<d", seg)[0]
+        return seg.decode("ascii", "replace").strip()
+    return seg.decode(encoding, "replace").rstrip(" \x00")

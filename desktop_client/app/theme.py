@@ -52,7 +52,7 @@ QLabel#PageTitle {
 }
 QLabel#PanelTitle {
     color: #26363c;
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 700;
 }
 QLabel#ProjectName {

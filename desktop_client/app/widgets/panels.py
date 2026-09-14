@@ -4,7 +4,9 @@ from ..qt_compat import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
     Qt,
 )
 
@@ -21,12 +23,16 @@ def clear_layout(layout):
             clear_layout(child_layout)
 
 
-def panel_box(kicker: str, title: str, right_text: str = ""):
-    """返回 (panel_frame, body_layout)：带标题栏和分隔线的白色面板。"""
+def panel_box(kicker: str, title: str, right_text: str = "", scrollable: bool = False):
+    """返回 (panel_frame, body_layout)：带标题栏和分隔线的白色面板。
+
+    scrollable=True 时，body 会被包进一个 QScrollArea（用于收纳较长的参数面板）。
+    """
     frame = QFrame()
     frame.setObjectName("Panel")
     root = QVBoxLayout(frame)
     root.setContentsMargins(0, 0, 0, 0)
+    root.setSpacing(0)
     header = QHBoxLayout()
     header.setContentsMargins(18, 14, 18, 12)
     labels = QVBoxLayout()
@@ -51,7 +57,18 @@ def panel_box(kicker: str, title: str, right_text: str = ""):
     body = QVBoxLayout()
     body.setContentsMargins(18, 12, 18, 17)
     body.setSpacing(10)
-    root.addLayout(body)
+    if scrollable:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        content.setLayout(body)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
+    else:
+        root.addLayout(body)
     return frame, body
 
 

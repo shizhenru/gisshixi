@@ -17,6 +17,7 @@ class AnalysisEngine:
         attribute_scripts = root / "core" / "algorithms" / "scripts" / "attribute"
         self.python_runner = PythonRunner(attribute_scripts / "gwr_placeholder.py")
         self.r_runner = RRunner(attribute_scripts / "gwr_placeholder.R", rscript_path)
+        self.r_gwr_runner = RRunner(attribute_scripts / "gwr_attribute.R", rscript_path)
         raster_script = root.parent / "栅格数据算法" / "desktop_raster_terra_analysis.R"
         self.raster_runner = RasterTerraRunner(raster_script, rscript_path)
 
@@ -42,7 +43,9 @@ class AnalysisEngine:
                     message="混合调度接口已预留。后续可在此处串联 Python 预处理、R 建模和统一结果汇总。",
                     output_path=str(output_path),
                 )
-            if backend.startswith("R"):
+            if backend == "R 属性 GWR":
+                payload = self.r_gwr_runner.run(parameters, output_path)
+            elif backend.startswith("R"):
                 payload = self.r_runner.run(parameters, output_path)
             else:
                 payload = self.python_runner.run(parameters, output_path)
@@ -53,6 +56,8 @@ class AnalysisEngine:
                 message=payload.get("message", "分析完成"),
                 output_path=str(output_path),
                 local_values=payload.get("local_values", []),
+                local_columns=payload.get("columns", {}),
+                output_shp=payload.get("output_shp") or "",
             )
         except Exception as exc:
             return AnalysisResult(

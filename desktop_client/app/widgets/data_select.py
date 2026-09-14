@@ -1,10 +1,13 @@
 """数据选择：勾选对话框 + 左侧数据选择面板。"""
 from ..qt_compat import (
+    QApplication,
     QDialog,
+    QDrag,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMimeData,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -13,6 +16,40 @@ from ..qt_compat import (
 )
 
 from .panels import clear_layout
+
+MIME_SOURCE_PATH = "application/x-spatial-source"
+
+
+class DraggableSourceLabel(QLabel):
+    """可拖拽的数据源名称标签，拖拽时携带数据源路径（MIME: application/x-spatial-source）。"""
+
+    def __init__(self, text, source_path, parent=None):
+        super().__init__(text, parent)
+        self._source_path = source_path
+        self._drag_start = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            if (event.position().toPoint() - self._drag_start).manhattanLength() >= QApplication.startDragDistance():
+                self._start_drag()
+                self._drag_start = None
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start = None
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self):
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(MIME_SOURCE_PATH, self._source_path.encode("utf-8"))
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
 
 
 class DataSelectDialog(QDialog):
@@ -95,7 +132,7 @@ class DataSelectionPanel(QWidget):
             icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
             icon.setStyleSheet("color: #2d8c7c; background: #e3f3ef; border-radius: 4px; font-size: 12px;")
             row.addWidget(icon)
-            name = QLabel(source.name)
+            name = DraggableSourceLabel(source.name, source.path)
             name.setStyleSheet("font-weight: 700;")
             name.setToolTip(self._tooltip_text(source))
             row.addWidget(name, 1)

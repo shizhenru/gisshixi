@@ -2,57 +2,99 @@
 
 面向 GIS 综合实习的多源空间数据验证项目。当前仓库以 Windows Qt 桌面客户端为主，支持属性数据、栅格数据和几何数据的登记、元数据检查、空间预处理、全局/局部差异分析和报告导出。
 
-> 当前版本仍处于开发阶段。Python 和 R 中的部分算法适配器仍是占位实现；栅格分析链路已经接入真实的 `rasterio` 预处理和 R `terra` 脚本。
+> 当前版本仍处于开发阶段。Python 后端与「R 占位算法」仍是占位实现；属性数据 GWR 已接入真实 R 实现（`sf`/`GWmodel`），栅格分析链路已接入真实的 `rasterio` 预处理和 R `terra` 脚本。
 
 ## 功能概览
 
 - 数据管理：导入 CSV、XLSX/XLS、GeoTIFF、IMG、ASC、GeoPackage、Shapefile 和 GeoJSON。
 - 元数据读取：识别字段、记录数、坐标系、空间范围、几何类型、预览记录和缺失值提示。
 - 空间预处理：以参考栅格为目标网格，统一 CRS、分辨率、范围和单波段 GeoTIFF 输出。
-- 属性/矢量分析：通过 Python 或 R 算法适配器执行任务，保留统一的 JSON 输入/输出接口。
+- 属性/矢量分析：通过 Python 或 R 算法适配器执行任务，保留统一的 JSON 输入/输出接口；「R 属性 GWR」后端为真实 GWR 实现。
 - 栅格分析：调用 R `terra` 脚本，计算 ME、MAE、MRE、RMSE、Pearson 相关系数和局部窗口指标。
 - 可视化：桌面端显示矢量几何、分析参数、指标卡、局部结果和任务状态。
 - 导出：导出数据目录 CSV、分析报告 Markdown 以及栅格分析生成的 GeoTIFF/CSV/PNG 文件。
 
+## 功能栏目
+
+界面采用「顶部导航 + 左侧数据选择 + 主内容」结构，五个栏目各司其职：
+
+| 栏目 | 职责 |
+|------|------|
+| 工作台 | 设置 GWR 模型参数（因变量 Y / 自变量 X / 核函数 / 带宽 / 带宽策略 / 距离度量 / 算法后端）并运行，展示结果地图、散点图与属性表 |
+| 数据管理 | 设定项目统一参数（坐标系 / 分辨率 / 研究区范围 / 数据格式），登记多源数据并做一致性检查（与统一参数不符的项标红） |
+| 预处理 | 工具箱式界面：工具目录 + 参数面板 + 运行历史，已接入栅格对齐（统一 CRS / 分辨率 / 范围） |
+| 空间分析 | 拉帘式对比两个数据源 + 带宽区间探索（100–1000，步长 100） |
+| 结果与报告 | 全局 / 局部模型摘要、图表与可复现的分析报告 |
+
 ## 项目结构
 
 ```text
-app/
-├─ desktop_client/                         # Qt 桌面客户端
-│  ├─ main.py                              # 程序入口
-│  ├─ app/
-│  │  ├─ main_window.py                    # 主窗口、导航、后台任务和 Rscript 设置
-│  │  ├─ pages.py                          # 工作台、数据、预处理、分析、结果、设置页面
-│  │  ├─ widgets.py                        # 地图画布和指标卡等控件
-│  │  ├─ qt_compat.py                      # PySide6/PyQt6 兼容导入
-│  │  └─ theme.py                          # Qt 样式
-│  ├─ core/
-│  │  ├─ models.py                         # 数据源、分析参数和结果模型
-│  │  ├─ project.py                        # 项目数据源目录和运行时配置持久化
-│  │  ├─ engine.py                         # 按后端分派分析任务
-│  │  ├─ raster_processing.py              # rasterio 栅格对齐预处理
-│  │  ├─ io/
-│  │  │  ├─ readers.py                     # CSV/矢量/栅格元数据读取
-│  │  │  ├─ data_registry.py               # 文件格式分类
-│  │  │  └─ exporters.py                   # 报告和数据目录导出
-│  │  └─ algorithms/
-│  │     ├─ base.py                        # 算法运行器抽象接口
-│  │     ├─ python_runner.py               # Python 子进程适配器
-│  │     ├─ r_runner.py                    # Rscript 子进程适配器
-│  │     ├─ raster_runner.py               # R/terra 栅格适配器
-│  │     └─ stubs/                         # Python/R 占位算法
-│  ├─ config/default_config.json           # 默认演示配置
-│  ├─ requirements.txt                     # Python 依赖
-│  ├─ run_client.ps1 / run_client.bat      # Windows 启动脚本
-│  └─ SpatialValidationClient.spec         # PyInstaller 配置
-├─ 属性数据算法/
-│  ├─ #testcommand.r                       # 属性数据 GWR 批处理示例
-│  └─ gwmv.r                               # 局部误差指标函数
-└─ 栅格数据算法/
-  ├─ desktop_raster_terra_analysis.R      # 桌面端调用的 R/terra 栅格脚本
-  ├─ nightlight_terra_analysis.R          # 夜光数据独立分析脚本
-  └─ gwmv.r                               # 栅格相关局部指标函数
+desktop_client/                              # Qt 桌面客户端（项目运行入口）
+├─ main.py                                   # 程序入口
+├─ requirements.txt                          # Python 依赖
+├─ run_client.ps1 / run_client.bat           # Windows 启动脚本
+├─ SpatialValidationClient.spec              # PyInstaller 配置
+├─ app/                                      # 界面层
+│  ├─ main_window.py                         # 主窗口：导航 + 数据选择 + 页面堆栈 + 状态栏
+│  ├─ qt_compat.py                           # PySide6/PyQt6 兼容导入
+│  ├─ theme.py                               # Qt 样式
+│  ├─ pages/                                 # 栏目页面，每个栏目一个子包
+│  │  ├─ workbench/                          #   工作台
+│  │  ├─ data/                               #   数据管理
+│  │  ├─ preprocess/                         #   预处理
+│  │  ├─ analysis/                           #   空间分析
+│  │  ├─ results/                            #   结果与报告
+│  │  └─ settings/                           #   系统设置
+│  └─ widgets/                               # 共享 UI 组件
+│     ├─ map_canvas.py                       #   地图画布（缩放/平移/复位）
+│     ├─ metric_card.py                      #   指标卡
+│     ├─ panels.py                           #   面板/页头/布局工具
+│     └─ data_select.py                      #   数据选择弹窗与左侧数据选择面板
+└─ core/                                     # 业务逻辑层（不依赖 Qt）
+   ├─ models.py                              # 数据源、分析参数和结果模型
+   ├─ project.py                             # 项目数据源和运行时配置持久化
+   ├─ engine.py                              # 按后端分派分析任务
+   ├─ raster_processing.py                   # rasterio 栅格对齐预处理
+   ├─ algorithms/                            # 算法子系统
+   │  ├─ base.py                             #   AlgorithmRunner 抽象基类
+   │  ├─ python_runner.py                    #   Python 子进程适配器
+   │  ├─ r_runner.py                         #   Rscript 子进程适配器
+   │  ├─ raster_runner.py                    #   R/terra 栅格适配器
+   │  └─ scripts/attribute/                  #   属性数据算法实现（JSON 进 → JSON 出）
+   │     ├─ gwr_placeholder.py / .R          #   占位实现
+   │     ├─ gwr_attribute.R                  #   真实 GWR（sf/GWmodel）
+   │     └─ gwmv.r                           #   局部误差指标辅助函数
+   └─ io/
+      ├─ readers.py                          # CSV/矢量/栅格元数据与几何读取
+      └─ exporters.py                        # 报告和数据目录导出
+
+属性数据算法/                                 # 独立 R 脚本（GWR 批处理示例）
+├─ #testcommand.r                            # 属性数据 GWR 两两比较批处理
+└─ gwmv.r                                    # 局部误差指标函数
+
+栅格数据算法/                                 # 独立 R 脚本（栅格分析）
+├─ desktop_raster_terra_analysis.R           # 桌面端调用的 R/terra 栅格脚本
+├─ nightlight_terra_analysis.R               # 夜光数据独立分析脚本
+└─ gwmv.r                                    # 栅格相关局部指标函数
 ```
+
+## 分层架构
+
+整个项目分两层：
+
+- **`app/`（界面层）**：负责「长什么样、怎么交互」，所有 Qt 组件、页面、样式都在这里。
+- **`core/`（业务逻辑层）**：负责「数据和算法怎么算」，与界面无关，不 import 任何 Qt 组件。
+
+`core/` 是整个后端，内部又分几块：
+
+| 模块 | 作用 |
+|------|------|
+| `models.py` / `project.py` / `io/` | 数据：数据结构、数据源存储、数据读写 |
+| `raster_processing.py` | 业务：栅格预处理 |
+| `engine.py` | 调度：把「算法名」分发到对应的 runner + 脚本 |
+| `algorithms/` | 算法：`*_runner.py` 是语言适配器（怎么执行），`scripts/` 是算法实现（算什么，按模式分类） |
+
+一句话：`app/` 管界面与交互，`core/` 管数据与算法；`algorithms/scripts/` 只是其中「算法计算脚本」这一小块。
 
 ## 快速启动桌面端
 
@@ -107,23 +149,86 @@ $env:SPATIAL_VALIDATION_PYTHON = "D:\path\to\gdal\python.exe"
 可选依赖：
 
 - `openpyxl`：增强 XLSX 字段、样例和缺失值读取。
-- R 及 `Rscript`：运行 R 占位算法和栅格 `terra` 分析。
-- R 包 `jsonlite`：运行 `desktop_client/core/algorithms/stubs/gwr_placeholder.R`。
+- R 及 `Rscript`：运行属性 GWR 算法和栅格 `terra` 分析。
+- R 包 `jsonlite`：所有 R 算法适配器读取配置、写出 JSON 结果所需。
+- R 包 `sf`、`GWmodel`、`sp`：运行属性数据 GWR（`scripts/attribute/gwr_attribute.R`）。
 - R 包 `terra`：运行 `栅格数据算法/desktop_raster_terra_analysis.R`。
-- R 包 `ggplot2`：栅格分析输出散点图；未安装时不影响核心统计和局部栅格输出。
+- R 包 `ggplot2`：栅格/属性分析输出散点图；未安装时不影响核心统计和局部栅格输出。
 
-如果使用 R 后端，请在桌面端“系统设置”中配置 `Rscript.exe` 路径。程序会把该路径传给普通 R 分析和栅格 `R / terra` 分析。
+如果使用 R 后端，请在桌面端「系统设置」中配置 `Rscript.exe` 路径。程序会把该路径传给普通 R 分析和栅格 `R / terra` 分析。具体配置方法见下一节「配置 R 环境（Rscript）」。
+
+## 配置 R 环境（Rscript）
+
+### Rscript.exe 是什么
+
+属性数据 GWR、栅格 `terra` 分析等算法用 R 语言编写，桌面客户端（Python/Qt）通过调用 `Rscript.exe` 来执行这些 `.R` 脚本。`Rscript.exe` 是 R 自带的命令行运行器——相当于用 `python.exe` 跑 `.py`、用 `Rscript.exe` 跑 `.R`，不需要打开 R 图形界面。
+
+### 安装 R
+
+若本机尚未安装 R，请到 [CRAN](https://cran.r-project.org/)（国内可选镜像 [清华 TUNA](https://mirrors.tuna.tsinghua.edu.cn/CRAN/)）下载 Windows 安装包并安装。Windows 下默认安装到 `C:\Program Files\R\R-x.y.z\`。
+
+### 找到 Rscript.exe 路径
+
+`Rscript.exe` 位于 R 安装目录的 `bin` 子目录，例如：
+
+```text
+C:\Program Files\R\R-4.5.3\bin\x64\Rscript.exe
+```
+
+优先选 `bin\x64\` 下的 64 位版本。也可以在 PowerShell 里用以下命令快速定位：
+
+```powershell
+where.exe Rscript
+```
+
+### 在客户端中配置
+
+1. 打开客户端，点击右上角「⚙ 设置」。
+2. 在「多语言运行环境」面板的「Rscript.exe 路径」中，点「浏览」选择上一步找到的 `Rscript.exe`，或直接粘贴路径。
+3. 路径会自动保存，后续运行「R 属性 GWR」或「栅格 R / terra」都会使用该 R。
+
+> 未配置时，程序会尝试从系统 PATH 中查找 `Rscript.exe`；若 PATH 里没有，则需手动配置。
+
+### 安装所需 R 包
+
+最省事的方式是用项目自带的 R 依赖清单（只装缺失的包，已装的自动跳过）：
+
+```powershell
+Set-Location .\desktop_client
+Rscript requirements.R
+```
+
+或指定 Rscript 完整路径：
+
+```powershell
+& "C:\Program Files\R\R-4.5.3\bin\x64\Rscript.exe" ".\desktop_client\requirements.R"
+```
+
+也可以手动安装单个包，例如：
+
+```powershell
+& "C:\Program Files\R\R-4.5.3\bin\x64\Rscript.exe" -e "install.packages('terra', repos='https://cloud.r-project.org')"
+```
+
+R 包清单见 `desktop_client/requirements.R`（`requirements.txt` 中也有备注）。按算法需要安装：
+
+| R 包 | 用途 |
+|------|------|
+| `jsonlite` | 所有 R 算法适配器读取配置、写出 JSON 结果（必需） |
+| `sf`、`GWmodel`、`sp` | 属性数据 GWR（「R 属性 GWR」后端） |
+| `terra` | 栅格分析（「栅格 R / terra」后端） |
+| `ggplot2` | 输出散点图（可选，不影响核心统计） |
 
 ## 客户端使用流程
 
-1. 启动桌面端，进入“数据管理”，导入至少一个或多个数据文件。
+1. 启动桌面端，进入「数据管理」，导入至少一个或多个数据文件。
 2. 检查每个数据源的格式、空间范围、CRS、记录数、字段和读取警告。
 3. 处理栅格数据时，确保至少导入两个带 CRS 的单波段栅格。
-4. 进入“预处理”，执行栅格统一。第一个栅格默认作为参考网格，也可以在代码层传入指定参考路径。
-5. 进入“工作台”，选择 Python、R 或“栅格 R / terra”后端，设置变量、核函数、带宽和距离度量。
-6. 点击“运行分析”，在“结果与报告”查看指标并导出报告。
+4. 进入「预处理」，执行栅格统一。第一个栅格默认作为参考网格，也可以在代码层传入指定参考路径。
+5. 进入「工作台」，选择 Python、R（含「R 属性 GWR」真实实现）或「栅格 R / terra」后端，设置变量、核函数、带宽和距离度量。
+6. 点击「运行分析」，在「结果与报告」查看指标并导出报告。
 
-普通属性/矢量分析使用占位 Python/R 脚本；选择“栅格 R / terra”时，客户端会优先使用预处理目录中的对齐栅格，并要求至少两个栅格数据源。
+普通属性/矢量分析中，Python 后端与「R 占位算法」仍是占位实现，返回演示指标；「R 属性 GWR」为真实 GWR 实现。选择「栅格 R / terra」时，客户端会优先使用预处理目录中的对齐栅格，并要求至少两个栅格数据源。
 
 ## 栅格处理链路
 
@@ -160,7 +265,9 @@ Rscript desktop_raster_terra_analysis.R reference comparison output_dir [window_
 
 统一分析结果还会写入 `desktop_client/.runtime/analysis_result.json`。
 
-## 算法接口
+## 算法接口与添加指南
+
+### 统一接口
 
 所有算法通过 `AlgorithmRunner.run(config, output_path)` 接入。调用方传入 JSON 配置，算法将 JSON 结果写入指定输出文件。结果至少应包含：
 
@@ -174,14 +281,83 @@ Rscript desktop_raster_terra_analysis.R reference comparison output_dir [window_
 }
 ```
 
-替换真实算法时优先修改以下位置：
+算法分两层：
 
-- Python 属性/模型算法：`desktop_client/core/algorithms/stubs/gwr_placeholder.py`
-- R 属性/模型算法：`desktop_client/core/algorithms/stubs/gwr_placeholder.R`
+- **runner（语言适配器）**：负责「怎么执行」，与具体算法无关、可复用。在 `core/algorithms/` 根目录：`python_runner.py`（Python）、`r_runner.py`（Rscript）、`raster_runner.py`（R/terra）。
+- **脚本（算法实现）**：负责「算什么」，按数据模式分类放在 `core/algorithms/scripts/` 下。
+
+| 数据模式 | 脚本目录 | 当前算法 | 使用的 runner |
+|---------|---------|---------|--------------|
+| 属性数据 | `scripts/attribute/` | `gwr_placeholder.py` / `.R`（占位）、`gwr_attribute.R`（真实 GWR） | `python_runner` / `r_runner` |
+| 栅格数据 | `scripts/raster/`（脚本暂在 `../栅格数据算法/`） | `desktop_raster_terra_analysis.R` | `raster_runner` |
+| 几何数据 | `scripts/geometry/`（待新增） | 未实现 | 复用或新增 runner |
+
+### 新增一个算法
+
+1. 在对应模式的 `scripts/<模式>/` 下新建脚本（Python `.py` 或 R `.R`），约定「JSON 配置进 → JSON 结果出」。
+2. 在 `core/engine.py` 的 `__init__` 里实例化一个 runner，指向新脚本。
+3. 在 `engine.run()` 里按 `backend`（算法名）加一个分支，分发到对应 runner。
+4. 在工作台「算法后端」下拉框里加对应选项（`app/pages/workbench/page.py`）。
+
+### 同一模式下的多个算法（子分类）
+
+- 直接在 `scripts/<模式>/` 下放多个脚本即可。例如属性模式下可放 `gwr.py`、`global_stats.py`、`ols.py`。
+- `engine.py` 用 `backend` 字符串区分具体算法，把「模式 + 算法名」映射到「runner + 脚本」。
+- 只有当「执行方式」不同（如需要 R/terra 环境、需要特殊参数处理）时才新增 runner；否则复用现有 `python_runner` / `r_runner`。
+
+### 替换真实算法时优先修改的位置
+
+- Python 属性/模型算法：`desktop_client/core/algorithms/scripts/attribute/gwr_placeholder.py`（占位）
+- R 属性/模型算法（真实 GWR）：`desktop_client/core/algorithms/scripts/attribute/gwr_attribute.R`
+  - 局部误差指标辅助函数：`desktop_client/core/algorithms/scripts/attribute/gwmv.r`
+  - 该脚本是对 `属性数据算法/#testcommand.r` 的参数化封装，由「R 属性 GWR」后端调用。
 - R 栅格算法：`栅格数据算法/desktop_raster_terra_analysis.R`
 - 后端分派：`desktop_client/core/engine.py`
 - 数据读取：`desktop_client/core/io/readers.py`
 - 项目数据源持久化：`desktop_client/core/project.py`
+
+## 开发指南
+
+本项目按「栏目」划分代码，请遵循以下规则，保持框架整洁、可并行开发。
+
+### 目录职责
+
+- `app/pages/<栏目>/`：每个栏目一个子包，只负责该栏目的界面。
+- `app/widgets/`：跨栏目共享的 UI 组件（地图、指标卡、面板工具、数据选择）。
+- `app/qt_compat.py`：PySide6 / PyQt6 兼容层，**统一从这里导入 Qt 组件**，不要直接 `import PyQt6`。
+- `app/theme.py`：全局样式表。
+- `core/`：与界面无关的业务逻辑（数据模型、存储、算法、数据读取）。
+
+### 栏目独立性
+
+- 每个栏目页面是自包含的 `QWidget`，只通过 `ProjectStore`（数据）和 `Qt Signal`（事件）与外部通信。
+- 栏目之间需要联动时，在 `main_window.py` 里做信号接线，而不是直接调用对方的类或方法。
+
+### core 层文件说明
+
+| 文件 | 职责 | 什么时候用 |
+|------|------|-----------|
+| `models.py` | 数据模型：`DataSource` / `AnalysisParameters` / `AnalysisResult` | 描述数据源、传分析参数、接收结果 |
+| `project.py` | `ProjectStore`：数据源增删与持久化（`.runtime/sources.json`） | 导入 / 删除数据、拿数据源列表 |
+| `engine.py` | `AnalysisEngine`：按 backend 分发给 Python / R / 栅格算法 | 运行分析任务 |
+| `raster_processing.py` | `RasterPreprocessor`：栅格对齐（CRS / 分辨率 / 范围） | 预处理「栅格对齐」工具 |
+| `algorithms/` | 算法适配器：`base.py` 抽象基类 + Python / R / R-terra runner + `scripts/` 脚本 | 接入真实算法时 |
+| `io/` | `readers.py` 读元数据 / SHP 几何、`exporters.py` 导出报告 / 清单 | 新增数据格式、导出结果 |
+
+界面用数据时 `from core.project import ProjectStore`、用模型时 `from core.models import ...`、跑算法时 `from core.engine import AnalysisEngine`。
+
+### 新增功能的位置
+
+- 新增算法：见「算法接口与添加指南」小节。
+- 新增预处理工具：在 `app/pages/preprocess/page.py` 的 `TOOLS` 列表登记工具，并在参数面板实现其参数。
+- 新增数据格式：在 `core/io/readers.py` 的 `read_metadata` 增加分支。
+- 新增共享组件：放 `app/widgets/`，不要在各栏目里复制粘贴。
+
+### 命名与规范
+
+- 页面类命名为 `XxxPage`，子包入口统一为 `from .page import XxxPage`。
+- 页面通过 `statusMessage`、`runRequested` 等信号向主窗口发消息，由主窗口统一处理状态栏与跨页联动。
+- 删除或移植代码时，保证没有残留未使用的代码、导入或文件。
 
 ## 独立 R 脚本
 
@@ -230,7 +406,7 @@ Rscript -e "library(terra); cat('terra ok\\n')"
 
 ## 当前限制
 
-- Python 和普通 R 后端中的 GWR 脚本目前是占位实现，返回演示指标；接入真实模型前不要将其结果用于正式研究结论。
+- Python 后端与「R 占位算法」中的 GWR 脚本目前是占位实现，返回演示指标；接入真实模型前不要将其结果用于正式研究结论。属性数据 GWR 已由「R 属性 GWR」后端提供真实实现。
 - 栅格分析要求输入栅格存在 CRS、为单波段且至少有两个数据集。
 - 当前 R/terra 栅格分析默认比较前两个栅格，并以预处理后的对齐文件作为输入。
 - 根目录目前没有独立 Web 客户端；项目运行入口是 `desktop_client`。
