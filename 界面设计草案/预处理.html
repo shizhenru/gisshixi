@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1200px; height:800px; overflow:hidden; }
+  body { font-family:'Microsoft YaHei','DengXian','SimHei',sans-serif; background:#f4f7f6; color:#26363c; font-size:13px; }
+
+  .topbar { width:1200px; height:52px; background:#fff; border-bottom:1px solid #dfe8e6; display:flex; align-items:center; padding:0 18px; gap:6px; }
+  .nav { color:#68807b; padding:9px 15px; border-radius:7px; }
+  .nav.active { background:#d6ece6; color:#1e655b; font-weight:700; }
+  .nav.right { margin-left:auto; color:#718589; }
+
+  .layout { display:flex; width:1200px; height:748px; }
+  .sidebar { width:210px; background:#eaf3f0; border-right:1px solid #dce7e4; padding:18px 13px; }
+  .sidebar h2 { font-size:15px; font-weight:700; margin-bottom:12px; }
+  .data-item { background:#fff; border:1px solid #e2eeea; border-radius:6px; padding:8px 11px; margin-bottom:6px; display:flex; align-items:center; gap:8px; }
+  .data-item .icon { color:#2d8c7c; font-size:14px; }
+  .data-item .name { font-weight:700; }
+  .btn-outline { background:#fff; border:1px solid #b7d5ce; color:#2d7066; border-radius:6px; padding:9px 12px; text-align:center; margin-top:8px; }
+
+  .main { flex:1; display:flex; flex-direction:column; padding:16px; gap:12px; }
+  .panel { background:#fff; border:1px solid #dfe8e6; border-radius:8px; }
+  .kicker { color:#2d8c7c; font-size:10px; font-weight:700; letter-spacing:1px; }
+  .title { font-size:16px; font-weight:700; }
+  .muted { color:#7b8b8e; font-size:11px; }
+
+  /* 搜索框 */
+  .search-box { background:#fff; border:1px solid #dfe8e6; border-radius:6px; padding:8px 12px; color:#7b8b8e; display:flex; gap:8px; align-items:center; }
+  .search-box .ph { color:#a8b8b4; }
+
+  /* 工具箱主体 */
+  .tool-row { flex:1; display:flex; gap:12px; min-height:0; }
+  .tool-catalog { width:260px; background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:10px 8px; overflow-y:auto; }
+  .cat { font-weight:700; color:#26363c; padding:6px 10px; margin-top:2px; }
+  .cat .arrow { color:#2d8c7c; }
+  .tool-item { color:#405155; padding:6px 10px 6px 26px; border-radius:5px; }
+  .tool-item.sel { background:#d6ece6; color:#1e655b; font-weight:700; }
+
+  /* 参数面板 */
+  .param-panel { flex:1; background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:16px 18px; }
+  .param-panel .pt { font-size:16px; font-weight:700; margin-bottom:4px; }
+  .param-panel .pd { color:#7b8b8e; font-size:11px; margin-bottom:14px; }
+  .field { margin-bottom:12px; }
+  .field label { display:block; font-size:11px; color:#7b8b8e; margin-bottom:3px; }
+  .select { background:#fbfcfc; border:1px solid #dfe8e6; border-radius:4px; padding:8px 10px; color:#405155; display:flex; justify-content:space-between; align-items:center; }
+  .select .arrow { color:#7b8b8e; }
+  .btn-primary { background:#2d8c7c; color:#fff; border:none; border-radius:6px; padding:10px 20px; font-weight:700; display:inline-block; }
+
+  /* 运行历史 */
+  .log-panel { height:190px; background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:12px 14px; position:relative; overflow:hidden; }
+  .log-panel .lt { font-size:15px; font-weight:700; margin-bottom:6px; }
+  .log-list { height:140px; overflow:hidden; }
+  .log-item { display:flex; gap:10px; align-items:center; padding:6px 4px; border-bottom:1px solid #f0f3f2; font-size:12px; }
+  .log-item .time { color:#7b8b8e; font-size:11px; width:38px; }
+  .log-item .name { font-weight:700; width:88px; }
+  .log-item .desc { color:#405155; flex:1; }
+  .status { font-weight:700; font-size:11px; }
+  .status.ok { color:#2d8c7c; }
+  .status.fail { color:#d86659; }
+  .status.run { color:#e78338; }
+  /* 模拟滚动条 */
+  .scrollbar { position:absolute; right:4px; top:34px; width:6px; height:80px; background:#dfe8e6; border-radius:3px; }
+  .scrollbar .thumb { position:absolute; top:10px; left:0; width:6px; height:26px; background:#c0cfcc; border-radius:3px; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="nav">工作台</div>
+    <div class="nav">数据管理</div>
+    <div class="nav active">预处理</div>
+    <div class="nav">空间分析</div>
+    <div class="nav">结果与报告</div>
+    <div class="nav right">⚙ 设置</div>
+  </div>
+
+  <div class="layout">
+    <div class="sidebar">
+      <h2>数据选择</h2>
+      <div class="data-item"><span class="icon">▤</span><span class="name">人口普查2020</span></div>
+      <div class="data-item"><span class="icon">▦</span><span class="name">NPP-VIIRS-2024</span></div>
+      <div class="data-item"><span class="icon">◫</span><span class="name">LUCC-武汉</span></div>
+      <div class="btn-outline">＋ 选择数据</div>
+    </div>
+
+    <div class="main">
+      <!-- 搜索框 -->
+      <div class="search-box">🔍 <span class="ph">搜索工具…</span></div>
+
+      <!-- 工具箱主体 -->
+      <div class="tool-row">
+        <!-- 工具目录 -->
+        <div class="tool-catalog">
+          <div class="cat"><span class="arrow">▾</span> 矢量</div>
+          <div class="tool-item">裁剪</div>
+          <div class="tool-item">缓冲区</div>
+          <div class="tool-item">融合</div>
+          <div class="tool-item">相交</div>
+          <div class="cat"><span class="arrow">▾</span> 栅格</div>
+          <div class="tool-item sel">重采样</div>
+          <div class="tool-item">掩膜提取</div>
+          <div class="tool-item">裁剪</div>
+          <div class="tool-item">栅格计算器</div>
+          <div class="cat"><span class="arrow">▾</span> 投影</div>
+          <div class="tool-item">坐标转换</div>
+          <div class="tool-item">定义投影</div>
+          <div class="cat"><span class="arrow">▾</span> 数据质量</div>
+          <div class="tool-item">缺失值检查</div>
+          <div class="tool-item">重复检查</div>
+          <div class="tool-item">拓扑检查</div>
+          <div class="cat"><span class="arrow">▾</span> 格式转换</div>
+          <div class="tool-item">格式转换</div>
+          <div class="tool-item">字段重命名</div>
+          <div class="cat"><span class="arrow">▾</span> 数据变换</div>
+          <div class="tool-item">对数变换</div>
+          <div class="tool-item">标准化</div>
+        </div>
+
+        <!-- 参数面板 -->
+        <div class="param-panel">
+          <div class="kicker">TOOL PARAMETERS</div>
+          <div class="pt">重采样</div>
+          <div class="pd">将栅格数据重采样到目标分辨率。</div>
+          <div class="field"><label>输入栅格</label><div class="select">NPP-VIIRS-2024 <span class="arrow">▾</span></div></div>
+          <div class="field"><label>目标分辨率</label><div class="select">500 m <span class="arrow">▾</span></div></div>
+          <div class="field"><label>重采样方法</label><div class="select">双线性插值 <span class="arrow">▾</span></div></div>
+          <div class="field"><label>输出路径</label><div class="select">自动命名 <span class="arrow">▾</span></div></div>
+          <div class="btn-primary">▶ 运行</div>
+        </div>
+      </div>
+
+      <!-- 运行历史 -->
+      <div class="log-panel">
+        <div class="lt">运行历史</div>
+        <div class="log-list">
+          <div class="log-item"><span class="time">14:32</span><span class="name">坐标转换</span><span class="desc">人口普查2020 → CGCS2000</span><span class="status ok">成功</span></div>
+          <div class="log-item"><span class="time">14:30</span><span class="name">裁剪</span><span class="desc">NPP-VIIRS-2024 → 武汉市域</span><span class="status ok">成功</span></div>
+          <div class="log-item"><span class="time">14:28</span><span class="name">掩膜提取</span><span class="desc">缺少掩膜图层</span><span class="status fail">失败</span></div>
+          <div class="log-item"><span class="time">14:25</span><span class="name">重采样</span><span class="desc">NPP-VIIRS-2024 → 500 m</span><span class="status ok">成功</span></div>
+          <div class="log-item"><span class="time">14:20</span><span class="name">缺失值检查</span><span class="desc">人口普查2020 · 3 处缺失</span><span class="status ok">成功</span></div>
+          <div class="log-item"><span class="time">14:18</span><span class="name">格式转换</span><span class="desc">LUCC-武汉 → GeoPackage</span><span class="status run">运行中</span></div>
+        </div>
+        <div class="scrollbar"><div class="thumb"></div></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

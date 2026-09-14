@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:1200px; height:800px; overflow:hidden; }
+body { font-family:'Microsoft YaHei','DengXian','SimHei',sans-serif; background:#f4f7f6; color:#26363c; font-size:13px; }
+.topbar { width:1200px; height:52px; background:#fff; border-bottom:1px solid #dfe8e6; display:flex; align-items:center; padding:0 18px; gap:6px; }
+.nav { color:#68807b; padding:9px 15px; border-radius:7px; }
+.nav.active { background:#d6ece6; color:#1e655b; font-weight:700; }
+.nav.right { margin-left:auto; color:#718589; }
+.layout { display:flex; width:1200px; height:748px; }
+.sidebar { width:210px; background:#eaf3f0; border-right:1px solid #dce7e4; padding:18px 13px; }
+.sidebar h2 { font-size:15px; font-weight:700; margin-bottom:12px; }
+.data-item { background:#fff; border:1px solid #e2eeea; border-radius:6px; padding:8px 11px; margin-bottom:6px; display:flex; align-items:center; gap:8px; }
+.data-item .icon { color:#2d8c7c; font-size:14px; }
+.data-item .name { font-weight:700; }
+.btn-outline { background:#fff; border:1px solid #b7d5ce; color:#2d7066; border-radius:6px; padding:9px 12px; text-align:center; margin-top:8px; }
+.btn-primary { background:#2d8c7c; color:#fff; border:none; border-radius:6px; padding:9px 16px; font-weight:700; }
+.main { flex:1; display:flex; flex-direction:column; padding:16px; gap:12px; overflow:hidden; }
+.panel { background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:18px; }
+.kicker { color:#2d8c7c; font-size:10px; font-weight:700; letter-spacing:1px; }
+.title { font-size:22px; font-weight:700; margin:2px 0 2px; }
+.muted { color:#7b8b8e; font-size:11px; }
+.row { display:flex; gap:12px; }
+.grow { flex:1; }
+.card { background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:16px; }
+.card .c-title { color:#7b8b8e; font-size:11px; }
+.card .c-value { font-size:24px; font-weight:700; color:#2d8c7c; }
+.card .c-note { color:#7b8b8e; font-size:11px; margin-top:2px; }
+.step { flex:1; background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:14px; }
+.step .num { width:27px; height:27px; border-radius:14px; background:#edf4f2; color:#839194; text-align:center; line-height:27px; font-weight:700; }
+.step .s-title { font-weight:700; margin-top:8px; }
+.step .s-note { color:#7b8b8e; font-size:11px; margin-top:3px; }
+table { width:100%; border-collapse:collapse; }
+th { text-align:left; color:#849295; font-size:10px; font-weight:700; background:#f8fafa; padding:10px 8px; border-bottom:1px solid #dfe8e6; }
+td { padding:9px 8px; border-bottom:1px solid #edf1f1; font-size:12px; }
+.toolbar { display:flex; gap:8px; margin-bottom:12px; }
+.prestep { display:flex; align-items:center; gap:12px; background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:12px 14px; margin-bottom:8px; }
+.badge { width:27px; height:27px; border-radius:14px; text-align:center; line-height:27px; font-weight:700; color:#fff; font-size:12px; }
+.badge.done { background:#2d8c7c; }
+.badge.todo { background:#edf4f2; color:#839194; }
+.p-title { font-weight:700; }
+.p-note { color:#7b8b8e; font-size:11px; }
+.tag { margin-left:auto; color:#2d8c7c; font-size:11px; font-weight:700; }
+.tag.todo { color:#e78338; }
+.report { background:#fbfcfb; border:1px solid #e5ecea; border-radius:6px; padding:14px; color:#68797b; line-height:1.7; min-height:180px; }
+.map-panel { flex:1; background:#fff; border:1px solid #dfe8e6; border-radius:8px; overflow:hidden; position:relative; display:flex; }
+.map-half { flex:1; position:relative; }
+.map-a { background:#eef5f1; }
+.map-b { background:#fdf1e7; }
+.map-label { position:absolute; top:12px; left:14px; font-weight:700; font-size:13px; }
+.map-label.a { color:#2d8c7c; }
+.map-label.b { color:#e78338; }
+.blob { position:absolute; border-radius:50%; }
+.blob.a1 { left:14%; top:22%; width:140px; height:100px; background:#7fc7b8; opacity:.65; }
+.blob.a2 { left:48%; top:48%; width:110px; height:80px; background:#7fc7b8; opacity:.65; }
+.blob.a3 { left:20%; top:66%; width:90px; height:64px; background:#7fc7b8; opacity:.55; }
+.blob.b1 { left:20%; top:28%; width:130px; height:96px; background:#f0b27a; opacity:.75; }
+.blob.b2 { left:52%; top:50%; width:100px; height:82px; background:#f0b27a; opacity:.75; }
+.blob.b3 { left:26%; top:70%; width:84px; height:60px; background:#e78338; opacity:.55; }
+.divider { position:absolute; left:50%; top:0; bottom:0; width:3px; background:#2d8c7c; }
+.divider-handle { position:absolute; left:50%; top:10px; transform:translateX(-50%); width:32px; height:24px; background:#2d8c7c; border-radius:5px; color:#fff; text-align:center; line-height:24px; font-size:12px; }
+.divider-hint { position:absolute; left:50%; bottom:8px; transform:translateX(-50%); color:#2d8c7c; font-size:11px; white-space:nowrap; }
+.bw-panel { background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:14px 18px; }
+.bw-label { font-weight:700; }
+.bw-track { position:relative; height:34px; margin-top:4px; }
+.bw-line { position:absolute; top:13px; left:60px; width:820px; height:5px; background:#d9e9e5; border-radius:3px; }
+.tick { position:absolute; top:4px; width:2px; height:10px; background:#8aa09b; }
+.tick span { position:absolute; top:12px; left:-10px; color:#7b8b8e; font-size:10px; white-space:nowrap; }
+.bw-handle { position:absolute; top:5px; left:388px; width:20px; height:20px; background:#2d8c7c; border:2px solid #fff; border-radius:50%; box-shadow:0 0 0 1px #2d8c7c; }
+.bw-hint { color:#7b8b8e; font-size:11px; margin-top:6px; }
+</style></head>
+<body><div class="topbar"><div class="nav">工作台</div><div class="nav">数据管理</div><div class="nav">预处理</div><div class="nav active">空间分析</div><div class="nav">结果与报告</div><div class="nav right">⚙ 设置</div></div><div class="layout">
+<div class="sidebar">
+  <h2>数据选择</h2>
+  <div class="data-item"><span class="icon">▤</span><span class="name">人口普查2020</span></div>
+  <div class="data-item"><span class="icon">▦</span><span class="name">NPP-VIIRS-2024</span></div>
+  <div class="data-item"><span class="icon">◫</span><span class="name">LUCC-武汉</span></div>
+  <div class="btn-outline">＋ 选择数据</div>
+</div>
+<div class="main">
+<div class="map-panel">
+  <div class="map-half map-a">
+    <div class="map-label a">数据 A：人口普查2020</div>
+    <div class="blob a1"></div><div class="blob a2"></div><div class="blob a3"></div>
+  </div>
+  <div class="map-half map-b">
+    <div class="map-label b">数据 B：世界人口栅格</div>
+    <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+  </div>
+  <div class="divider"></div>
+  <div class="divider-handle">⇆</div>
+  <div class="divider-hint">← 拖动分割线 →</div>
+</div>
+<div class="bw-panel">
+  <span class="bw-label">带宽区间</span>
+  <div class="bw-track">
+    <div class="bw-line"></div>
+    <div class="tick" style="left:60px"><span>100</span></div>
+    <div class="tick" style="left:151px"><span>200</span></div>
+    <div class="tick" style="left:242px"><span>300</span></div>
+    <div class="tick" style="left:333px"><span>400</span></div>
+    <div class="tick" style="left:424px"><span>500</span></div>
+    <div class="tick" style="left:515px"><span>600</span></div>
+    <div class="tick" style="left:606px"><span>700</span></div>
+    <div class="tick" style="left:697px"><span>800</span></div>
+    <div class="tick" style="left:788px"><span>900</span></div>
+    <div class="tick" style="left:879px"><span>1000</span></div>
+    <div class="bw-handle"></div>
+  </div>
+  <div class="bw-hint">拖动带宽时左右两侧同时按当前带宽重算 · 临时保存 10 幅快照（步长 100）</div>
+</div>
+</div></div></body></html>

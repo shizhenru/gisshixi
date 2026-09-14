@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1200px; height:800px; overflow:hidden; }
+  body { font-family:'Microsoft YaHei','DengXian','SimHei',sans-serif; background:#f4f7f6; color:#26363c; font-size:13px; }
+  .topbar { width:1200px; height:52px; background:#fff; border-bottom:1px solid #dfe8e6; display:flex; align-items:center; padding:0 18px; gap:6px; }
+  .nav { color:#68807b; padding:9px 15px; border-radius:7px; }
+  .nav.active { background:#d6ece6; color:#1e655b; font-weight:700; }
+  .nav.right { margin-left:auto; color:#718589; }
+  .layout { display:flex; width:1200px; height:748px; }
+  .sidebar { width:210px; background:#eaf3f0; border-right:1px solid #dce7e4; padding:18px 13px; }
+  .sidebar h2 { font-size:15px; font-weight:700; margin-bottom:12px; }
+  .data-item { background:#fff; border:1px solid #e2eeea; border-radius:6px; padding:8px 11px; margin-bottom:6px; display:flex; align-items:center; gap:8px; }
+  .data-item .icon { color:#2d8c7c; font-size:14px; }
+  .data-item .name { font-weight:700; }
+  .btn-outline { background:#fff; border:1px solid #b7d5ce; color:#2d7066; border-radius:6px; padding:9px 12px; text-align:center; margin-top:8px; }
+  .main { flex:1; display:flex; flex-direction:column; padding:16px; gap:10px; overflow:hidden; }
+  .panel { background:#fff; border:1px solid #dfe8e6; border-radius:8px; padding:12px 16px; }
+  .kicker { color:#2d8c7c; font-size:10px; font-weight:700; letter-spacing:1px; }
+  .title { font-size:15px; font-weight:700; margin-top:1px; }
+  .muted { color:#7b8b8e; font-size:11px; }
+
+  /* 全局摘要：8 个指标卡 */
+  .stat-grid { display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; }
+  .stat { flex:1; min-width:90px; background:#f8fafa; border:1px solid #edf1f1; border-radius:6px; padding:9px 10px; }
+  .stat .k { color:#7b8b8e; font-size:10px; }
+  .stat .v { font-size:18px; font-weight:700; color:#2d8c7c; margin-top:2px; }
+
+  /* 局部摘要 */
+  .stat-row { display:flex; gap:10px; margin-top:8px; flex-wrap:wrap; }
+  .stat-row .item { flex:1; background:#f1f8f5; border:1px solid #dbece7; border-radius:6px; padding:8px 10px; font-size:12px; }
+  .stat-row .item b { color:#2d8c7c; }
+
+  /* 图表 */
+  .chart-row { display:flex; gap:10px; margin-top:8px; }
+  .chart { flex:1; border:1px solid #dfe8e6; border-radius:6px; height:110px; position:relative; overflow:hidden; background:#fbfcfb; }
+  .chart .cl { position:absolute; bottom:6px; left:0; right:0; text-align:center; font-size:10px; color:#7b8b8e; }
+
+  /* 报告 */
+  .report-text { background:#fbfcfb; border:1px solid #e5ecea; border-radius:6px; padding:10px 12px; color:#68797b; font-size:12px; line-height:1.7; margin-top:8px; height:78px; }
+  .btns { margin-top:10px; display:flex; gap:8px; }
+  .btn-primary { background:#2d8c7c; color:#fff; border:none; border-radius:6px; padding:9px 18px; font-weight:700; }
+  .btn-ghost { background:transparent; color:#718589; border:none; padding:9px 12px; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="nav">工作台</div>
+    <div class="nav">数据管理</div>
+    <div class="nav">预处理</div>
+    <div class="nav">空间分析</div>
+    <div class="nav active">结果与报告</div>
+    <div class="nav right">⚙ 设置</div>
+  </div>
+
+  <div class="layout">
+    <div class="sidebar">
+      <h2>数据选择</h2>
+      <div class="data-item"><span class="icon">▤</span><span class="name">人口普查2020</span></div>
+      <div class="data-item"><span class="icon">▦</span><span class="name">NPP-VIIRS-2024</span></div>
+      <div class="data-item"><span class="icon">◫</span><span class="name">LUCC-武汉</span></div>
+      <div class="btn-outline">＋ 选择数据</div>
+    </div>
+
+    <div class="main">
+      <!-- 全局模型摘要 -->
+      <div class="panel">
+        <div class="kicker">GLOBAL MODEL</div>
+        <div class="title">全局模型摘要</div>
+        <div class="stat-grid">
+          <div class="stat"><div class="k">R²</div><div class="v">0.82</div></div>
+          <div class="stat"><div class="k">调整 R²</div><div class="v">0.80</div></div>
+          <div class="stat"><div class="k">AICc</div><div class="v">1234</div></div>
+          <div class="stat"><div class="k">最优带宽</div><div class="v">25</div></div>
+          <div class="stat"><div class="k">ME</div><div class="v">-0.2</div></div>
+          <div class="stat"><div class="k">MAE</div><div class="v">8.4</div></div>
+          <div class="stat"><div class="k">RMSE</div><div class="v">13.7</div></div>
+          <div class="stat"><div class="k">相关系数</div><div class="v">0.91</div></div>
+        </div>
+      </div>
+
+      <!-- 局部统计摘要 -->
+      <div class="panel">
+        <div class="kicker">LOCAL SUMMARY</div>
+        <div class="title">局部统计摘要</div>
+        <div class="stat-row">
+          <div class="item">局部 R²：<b>0.45 ~ 0.91</b>（中位数 0.74）</div>
+          <div class="item">回归系数：<b>0.2 ~ 1.8</b></div>
+          <div class="item">显著区域占比：<b>82%</b></div>
+        </div>
+      </div>
+
+      <!-- 图表 -->
+      <div class="panel">
+        <div class="kicker">CHARTS</div>
+        <div class="title">图表</div>
+        <div class="chart-row">
+          <div class="chart"><svg width="100%" height="100%" viewBox="0 0 200 110" preserveAspectRatio="none"><line x1="20" y1="90" x2="185" y2="90" stroke="#cbdad7"/><line x1="20" y1="90" x2="20" y2="15" stroke="#cbdad7"/><line x1="20" y1="90" x2="185" y2="20" stroke="#e78338" stroke-dasharray="4 3"/><circle cx="60" cy="60" r="3" fill="#2d8c7c"/><circle cx="90" cy="45" r="3" fill="#2d8c7c"/><circle cx="130" cy="35" r="3" fill="#2d8c7c"/><circle cx="150" cy="25" r="3" fill="#2d8c7c"/></svg><div class="cl">散点图</div></div>
+          <div class="chart"><svg width="100%" height="100%" viewBox="0 0 200 110" preserveAspectRatio="none"><line x1="20" y1="90" x2="185" y2="90" stroke="#cbdad7"/><rect x="30" y="55" width="16" height="35" fill="#7fc7b8"/><rect x="55" y="40" width="16" height="50" fill="#7fc7b8"/><rect x="80" y="30" width="16" height="60" fill="#7fc7b8"/><rect x="105" y="45" width="16" height="45" fill="#7fc7b8"/><rect x="130" y="25" width="16" height="65" fill="#7fc7b8"/><rect x="155" y="50" width="16" height="40" fill="#7fc7b8"/></svg><div class="cl">误差直方图</div></div>
+          <div class="chart"><svg width="100%" height="100%" viewBox="0 0 200 110" preserveAspectRatio="none"><line x1="20" y1="90" x2="185" y2="90" stroke="#cbdad7"/><rect x="30" y="60" width="16" height="30" fill="#f0b27a"/><rect x="55" y="45" width="16" height="45" fill="#f0b27a"/><rect x="80" y="35" width="16" height="55" fill="#f0b27a"/><rect x="105" y="30" width="16" height="60" fill="#f0b27a"/><rect x="130" y="50" width="16" height="40" fill="#f0b27a"/><rect x="155" y="65" width="16" height="25" fill="#f0b27a"/></svg><div class="cl">局部 R² 直方图</div></div>
+          <div class="chart"><svg width="100%" height="100%" viewBox="0 0 200 110" preserveAspectRatio="none"><line x1="20" y1="90" x2="185" y2="90" stroke="#cbdad7"/><line x1="100" y1="90" x2="100" y2="15" stroke="#e78338" stroke-dasharray="4 3"/><rect x="50" y="55" width="16" height="35" fill="#7fc7b8"/><rect x="75" y="40" width="16" height="50" fill="#7fc7b8"/><rect x="100" y="25" width="16" height="65" fill="#7fc7b8"/><rect x="125" y="48" width="16" height="42" fill="#7fc7b8"/><rect x="150" y="62" width="16" height="28" fill="#7fc7b8"/></svg><div class="cl">系数直方图</div></div>
+          <div class="chart"><svg width="100%" height="100%" viewBox="0 0 200 110" preserveAspectRatio="none"><ellipse cx="80" cy="45" rx="45" ry="30" fill="#7fc7b8" opacity=".6"/><ellipse cx="140" cy="70" rx="35" ry="22" fill="#2d8c7c" opacity=".5"/><ellipse cx="60" cy="80" rx="25" ry="16" fill="#f0b27a" opacity=".5"/></svg><div class="cl">专题图</div></div>
+        </div>
+      </div>
+
+      <!-- 分析报告 -->
+      <div class="panel">
+        <div class="kicker">REPORT</div>
+        <div class="title">分析报告</div>
+        <div class="report-text">本次 GWR 以 worldpop 拟合 pop2024，采用自适应双平方核（带宽 25，AIC 自动选择）。全局 R²=0.82，局部 R² 集中在 0.45~0.91，中心城区拟合较好、边缘区域差异较大（显著区域占 82%）。数据经 CGCS2000 投影、500m 重采样标准化。</div>
+        <div class="btns">
+          <span class="btn-primary">↓ 生成报告</span>
+          <span class="btn-ghost">↓ 导出数据清单</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

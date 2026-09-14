@@ -6,7 +6,7 @@ project = Path(SPECPATH)
 a = Analysis(
     [str(project / "main.py")],
     pathex=[str(project)],
-    datas=[(str(project / "config"), "config")],
+    datas=[],
     hiddenimports=[],
     noarchive=False,
 )

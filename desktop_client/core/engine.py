@@ -14,9 +14,9 @@ class AnalysisEngine:
     def __init__(self, project_dir: Path | None = None, rscript_path: str = ""):
         root = project_dir or Path(__file__).resolve().parents[1]
         self.project_dir = root
-        stubs = root / "core" / "algorithms" / "stubs"
-        self.python_runner = PythonRunner(stubs / "gwr_placeholder.py")
-        self.r_runner = RRunner(stubs / "gwr_placeholder.R", rscript_path)
+        attribute_scripts = root / "core" / "algorithms" / "scripts" / "attribute"
+        self.python_runner = PythonRunner(attribute_scripts / "gwr_placeholder.py")
+        self.r_runner = RRunner(attribute_scripts / "gwr_placeholder.R", rscript_path)
         raster_script = root.parent / "栅格数据算法" / "desktop_raster_terra_analysis.R"
         self.raster_runner = RasterTerraRunner(raster_script, rscript_path)
 

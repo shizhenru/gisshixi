@@ -31,8 +31,8 @@ class DataSource:
 
 @dataclass
 class AnalysisParameters:
-    dependent_variable: str = "夜光遥感"
-    independent_variable: str = "人口密度"
+    dependent_variable: str = ""
+    independent_variable: str = ""
     kernel: str = "双平方核"
     bandwidth: float = 0.62
     bandwidth_mode: str = "自适应带宽"
@@ -54,18 +54,8 @@ class AnalysisParameters:
 @dataclass
 class AnalysisResult:
     status: str = "ready"
-    engine: str = "演示引擎"
-    metrics: dict[str, str] = field(default_factory=lambda: {
-        "mae": "8.42",
-        "rmse": "13.67",
-        "correlation": "0.82",
-        "local_r2": "0.74",
-        "difference_area": "18.6%",
-        "duration": "02:41",
-    })
+    engine: str = "未运行"
+    metrics: dict[str, str] = field(default_factory=dict)
     message: str = "等待运行分析"
     output_path: str = ""
-    local_values: list[float] = field(default_factory=lambda: [
-        0.86, 0.78, 0.71, 0.64, 0.82, 0.75, 0.69, 0.91, 0.73,
-        0.66, 0.59, 0.84, 0.77, 0.62, 0.81, 0.72, 0.68, 0.88,
-    ])
+    local_values: list[float] = field(default_factory=list)
