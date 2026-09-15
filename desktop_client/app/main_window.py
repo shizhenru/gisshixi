@@ -186,6 +186,8 @@ class SpatialValidationWindow(QMainWindow):
             self.workbench_page.update_after_data_change()
         elif key == "preprocess":
             self.preprocess_page.update_after_data_change()
+        elif key == "analysis":
+            self.analysis_page.update_after_data_change()
         for name, button in self.nav_buttons.items():
             button.setProperty("active", name == key)
             button.style().unpolish(button)
