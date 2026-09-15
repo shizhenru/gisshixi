@@ -170,6 +170,7 @@ class WorkbenchPage(QWidget):
 
         self.symbology_field_combo = QComboBox()
         self.symbology_field_combo.setFixedHeight(32)
+        self._style_combo(self.symbology_field_combo)
         body.addWidget(self.symbology_field_combo)
 
         self.symbology_method_combo = self._add_select(body, "分类方法", ["自然间断点", "等间隔", "分位数", "手动"])
@@ -238,10 +239,12 @@ class WorkbenchPage(QWidget):
         raster_layout.addWidget(QLabel("参考栅格"), 0, Qt.AlignmentFlag.AlignLeft)
         self.raster_reference_combo = QComboBox()
         self.raster_reference_combo.setFixedHeight(32)
+        self._style_combo(self.raster_reference_combo)
         raster_layout.addWidget(self.raster_reference_combo)
         raster_layout.addWidget(QLabel("对比栅格"), 0, Qt.AlignmentFlag.AlignLeft)
         self.raster_comparison_combo = QComboBox()
         self.raster_comparison_combo.setFixedHeight(32)
+        self._style_combo(self.raster_comparison_combo)
         raster_layout.addWidget(self.raster_comparison_combo)
         raster_layout.addWidget(QLabel("局部窗口大小"), 0, Qt.AlignmentFlag.AlignLeft)
         self.raster_window_spin = QSpinBox()
@@ -253,6 +256,7 @@ class WorkbenchPage(QWidget):
         self.raster_resampling_combo = QComboBox()
         self.raster_resampling_combo.addItems(["bilinear", "near", "cubic"])
         self.raster_resampling_combo.setFixedHeight(32)
+        self._style_combo(self.raster_resampling_combo)
         raster_layout.addWidget(self.raster_resampling_combo)
         raster_layout.addWidget(QLabel("相对误差零值阈值"), 0, Qt.AlignmentFlag.AlignLeft)
         self.raster_epsilon_spin = QDoubleSpinBox()

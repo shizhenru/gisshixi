@@ -16,6 +16,7 @@ class RasterPreprocessResult:
     message: str
     output_dir: str
     reference: str = ""
+    selected_sources: list[str] | None = None
     processed: list[dict[str, Any]] | None = None
     checks: list[str] | None = None
     warnings: list[str] | None = None
@@ -23,6 +24,7 @@ class RasterPreprocessResult:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["processed"] = payload["processed"] or []
+        payload["selected_sources"] = payload["selected_sources"] or []
         payload["checks"] = payload["checks"] or []
         payload["warnings"] = payload["warnings"] or []
         return payload
@@ -44,13 +46,18 @@ class RasterPreprocessor:
         self.output_dir = project_dir / ".runtime" / "raster_preprocess"
         self.manifest_path = self.output_dir / "manifest.json"
 
-    def preprocess(self, sources, reference_path: str = "") -> RasterPreprocessResult:
+    def preprocess(self, sources, reference_path: str = "", selected_paths=None) -> RasterPreprocessResult:
         rasters = collect_raster_sources(sources)
+        if selected_paths is not None:
+            selected_set = {str(path) for path in selected_paths}
+            rasters = [source for source in rasters if source.path in selected_set]
+        selected_sources = [source.path for source in rasters]
         if len(rasters) < 2:
             return RasterPreprocessResult(
                 status="error",
-                message="请至少导入两个栅格数据集后再执行预处理。",
+                message="请至少选择两个栅格数据集后再执行预处理。",
                 output_dir=str(self.output_dir),
+                selected_sources=selected_sources,
             )
 
         try:
@@ -62,6 +69,7 @@ class RasterPreprocessor:
                 status="error",
                 message="缺少 rasterio，无法执行栅格坐标系、分辨率和范围统一。请安装 rasterio 后重试。",
                 output_dir=str(self.output_dir),
+                selected_sources=selected_sources,
                 warnings=["pip install rasterio"],
             )
 
@@ -151,6 +159,7 @@ class RasterPreprocessor:
             message=f"栅格预处理完成：已对齐 {len(processed)} 个数据集。",
             output_dir=str(self.output_dir),
             reference=reference.path,
+            selected_sources=selected_sources,
             processed=processed,
             checks=checks,
             warnings=warnings,

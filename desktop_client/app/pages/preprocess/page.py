@@ -49,6 +49,7 @@ class PreprocessPage(QWidget):
         self.dynamic_body = None
         self.progress = None
         self.log = None
+        self.raster_list = None
         self._build()
 
     def _build(self):
@@ -132,6 +133,25 @@ class PreprocessPage(QWidget):
         self.ref_combo = QComboBox()
         self.ref_combo.setFixedHeight(32)
         self.dynamic_body.addWidget(self.ref_combo)
+        selected_label = QLabel("本次处理栅格（至少选择两个）")
+        selected_label.setObjectName("Muted")
+        self.dynamic_body.addWidget(selected_label)
+        self.raster_list = QListWidget()
+        self.raster_list.setMinimumHeight(110)
+        self.raster_list.setMaximumHeight(170)
+        self.raster_list.itemChanged.connect(self._on_raster_item_changed)
+        self.dynamic_body.addWidget(self.raster_list)
+        selection_buttons = QHBoxLayout()
+        select_all = QPushButton("全选")
+        select_all.setObjectName("OutlineButton")
+        select_all.clicked.connect(lambda: self._set_all_rasters(True))
+        clear_selection = QPushButton("清空")
+        clear_selection.setObjectName("OutlineButton")
+        clear_selection.clicked.connect(lambda: self._set_all_rasters(False))
+        selection_buttons.addWidget(select_all)
+        selection_buttons.addWidget(clear_selection)
+        selection_buttons.addStretch()
+        self.dynamic_body.addLayout(selection_buttons)
         run = QPushButton("▶ 运行")
         run.setObjectName("PrimaryButton")
         run.clicked.connect(self._run_raster_align)
@@ -139,9 +159,63 @@ class PreprocessPage(QWidget):
         self._refresh_ref_combo()
 
     def _refresh_ref_combo(self):
+        current_reference = self.ref_combo.currentData()
+        current_selected = self._selected_raster_paths()
+        manifest = self.preprocessor.latest_manifest() or {}
+        manifest_selected = set(manifest.get("selected_sources", []))
+        if not current_selected:
+            current_selected = manifest_selected
         self.ref_combo.clear()
-        for source in collect_raster_sources(self.store.sources):
+        rasters = collect_raster_sources(self.store.sources)
+        for source in rasters:
             self.ref_combo.addItem(source.name, source.path)
+        if rasters:
+            reference_index = next((i for i, source in enumerate(rasters) if source.path == current_reference), 0)
+            self.ref_combo.setCurrentIndex(reference_index)
+        reference_path = self.ref_combo.currentData()
+        if not current_selected:
+            current_selected = {source.path for source in rasters[:2]}
+        if reference_path:
+            current_selected.add(reference_path)
+        self.raster_list.blockSignals(True)
+        self.raster_list.clear()
+        for source in rasters:
+            item = QListWidgetItem(f"{source.icon}  {source.name} · {source.records}")
+            item.setData(Qt.ItemDataRole.UserRole, source.path)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if source.path in current_selected else Qt.CheckState.Unchecked)
+            self.raster_list.addItem(item)
+        self.raster_list.blockSignals(False)
+
+    def _selected_raster_paths(self):
+        if self.raster_list is None:
+            return set()
+        return {
+            self.raster_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.raster_list.count())
+            if self.raster_list.item(i).checkState() == Qt.CheckState.Checked
+        }
+
+    def _on_raster_item_changed(self, item):
+        reference_path = self.ref_combo.currentData()
+        if reference_path and item.data(Qt.ItemDataRole.UserRole) == reference_path and item.checkState() != Qt.CheckState.Checked:
+            self.raster_list.blockSignals(True)
+            item.setCheckState(Qt.CheckState.Checked)
+            self.raster_list.blockSignals(False)
+
+    def _set_all_rasters(self, checked):
+        self.raster_list.blockSignals(True)
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for i in range(self.raster_list.count()):
+            self.raster_list.item(i).setCheckState(state)
+        self.raster_list.blockSignals(False)
+        if not checked and self.ref_combo.currentData():
+            reference_path = self.ref_combo.currentData()
+            for i in range(self.raster_list.count()):
+                item = self.raster_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == reference_path:
+                    item.setCheckState(Qt.CheckState.Checked)
+                    break
 
     def _on_tool_selected(self, current, previous):
         del previous
@@ -158,17 +232,17 @@ class PreprocessPage(QWidget):
             self.param_desc.setText("该工具参数待实现。")
 
     def _run_raster_align(self):
-        rasters = collect_raster_sources(self.store.sources)
-        if len(rasters) < 2:
-            self.statusMessage.emit("请先在数据管理中导入至少两个栅格数据集")
-            self._log("栅格对齐：失败（栅格不足）")
+        selected_paths = self._selected_raster_paths()
+        if len(selected_paths) < 2:
+            self.statusMessage.emit("请至少选择两个栅格数据集")
+            self._log("栅格对齐：失败（选择的栅格不足）")
             return
         reference = self.ref_combo.currentData() or ""
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
         self.statusMessage.emit("正在统一栅格坐标系、分辨率和范围…")
         try:
-            result = self.preprocessor.preprocess(rasters, reference)
+            result = self.preprocessor.preprocess(self.store.sources, reference, selected_paths)
         except Exception as exc:
             self.progress.setRange(0, 100)
             self.progress.setVisible(False)

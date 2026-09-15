@@ -149,12 +149,22 @@ QComboBox::down-arrow {
 }
 QComboBox QAbstractItemView {
     background: #ffffff;
+    color: #26363c;
     border: 1px solid #dfe8e6;
     border-radius: 6px;
     padding: 4px;
     selection-background-color: #e3f3ef;
     selection-color: #1f695e;
     outline: none;
+}
+QComboBox QAbstractItemView::item {
+    color: #26363c;
+    background: #ffffff;
+    padding: 5px 8px;
+}
+QComboBox QAbstractItemView::item:selected {
+    color: #1f695e;
+    background: #e3f3ef;
 }
 QSlider::groove:horizontal {
     height: 4px;

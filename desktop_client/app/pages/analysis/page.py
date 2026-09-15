@@ -69,7 +69,10 @@ class AnalysisPage(QWidget):
     def _refresh_raster_choices(self):
         if self.reference_combo is None:
             return
-        rasters = collect_raster_sources(self.store.sources)
+        manifest = RasterPreprocessor(self.store.project_dir).latest_manifest() or {}
+        processed = manifest.get("processed", [])
+        processed_paths = {item.get("source_path") for item in processed}
+        rasters = [source for source in collect_raster_sources(self.store.sources) if source.path in processed_paths]
         current_a = self.reference_combo.currentData()
         current_b = self.comparison_combo.currentData()
         for combo in (self.reference_combo, self.comparison_combo):
@@ -82,6 +85,10 @@ class AnalysisPage(QWidget):
             self.reference_combo.setCurrentIndex(next((i for i, s in enumerate(rasters) if s.path == current_a), 0))
             default_b = 1 if len(rasters) > 1 else 0
             self.comparison_combo.setCurrentIndex(next((i for i, s in enumerate(rasters) if s.path == current_b), default_b))
+        else:
+            self.raster_canvas.clear()
+            self.compare_status.setText("请先在「预处理」中选择并运行至少两个栅格的对齐")
+            return
         self._load_selected()
 
     def _load_selected(self):
