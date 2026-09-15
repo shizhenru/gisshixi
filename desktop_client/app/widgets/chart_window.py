@@ -8,6 +8,7 @@ from ..qt_compat import (
     QWidget,
     Signal,
 )
+from ..theme import APP_STYLE
 from .histogram_canvas import HistogramCanvas
 from .scatter_canvas import ScatterCanvas
 
@@ -20,6 +21,7 @@ class ChartWindow(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setStyleSheet(APP_STYLE)
         self._fields = []
         self._values = {}
         self._scatter_feature_ids = []

@@ -28,6 +28,7 @@ class DataPage(QWidget):
     def __init__(self, store, parent=None):
         super().__init__(parent)
         self.store = store
+        self.reference_combo = None
         self.crs_combo = None
         self.resolution_combo = None
         self.extent_combo = None
@@ -42,6 +43,18 @@ class DataPage(QWidget):
 
         # 项目统一参数设置
         std, std_body = panel_box("PROJECT STANDARD", "项目统一参数设置")
+
+        ref_row = QHBoxLayout()
+        ref_label = QLabel("参考数据源")
+        ref_label.setObjectName("Muted")
+        ref_row.addWidget(ref_label)
+        self.reference_combo = QComboBox()
+        self.reference_combo.setFixedHeight(32)
+        self.reference_combo.addItem("手动设置")
+        ref_row.addWidget(self.reference_combo)
+        ref_row.addStretch()
+        std_body.addLayout(ref_row)
+
         row = QHBoxLayout()
         row.setSpacing(12)
         self.crs_combo = self._add_std_field(row, "坐标系", ["CGCS2000 / 3°分带", "WGS 84"])
@@ -50,7 +63,7 @@ class DataPage(QWidget):
         self.format_combo = self._add_std_field(row, "数据格式", ["GeoPackage", "Shapefile", "GeoTIFF"])
         row.addStretch()
         std_body.addLayout(row)
-        note = QLabel("设置后自动对比下方数据，与统一参数不同的项标红。")
+        note = QLabel("选择「参考数据源」自动填充统一参数，或手动设置；与统一参数不同的项标红。")
         note.setObjectName("Muted")
         std_body.addWidget(note)
         root.addWidget(std)
@@ -82,7 +95,10 @@ class DataPage(QWidget):
         catalog_body.addWidget(self.table, 1)
         root.addWidget(catalog, 1)
 
-        self.crs_combo.currentTextChanged.connect(self.refresh)
+        self.reference_combo.currentTextChanged.connect(self._on_reference_changed)
+        for combo in (self.crs_combo, self.resolution_combo, self.extent_combo, self.format_combo):
+            combo.currentTextChanged.connect(self.refresh)
+        self._refresh_reference_combo()
         self.refresh()
 
     def _add_std_field(self, row, label_text, items):
@@ -97,6 +113,42 @@ class DataPage(QWidget):
         holder.addWidget(combo)
         row.addLayout(holder)
         return combo
+
+    @staticmethod
+    def _set_combo_value(combo, value):
+        if value is None:
+            return
+        if combo.findText(value) < 0:
+            combo.addItem(value)
+        combo.setCurrentText(value)
+
+    def _refresh_reference_combo(self):
+        current = self.reference_combo.currentText()
+        self.reference_combo.blockSignals(True)
+        self.reference_combo.clear()
+        self.reference_combo.addItem("手动设置")
+        for source in self.store.sources:
+            self.reference_combo.addItem(source.name)
+        self.reference_combo.blockSignals(False)
+        items = [self.reference_combo.itemText(i) for i in range(self.reference_combo.count())]
+        if current and current in items:
+            self.reference_combo.setCurrentText(current)
+
+    def _on_reference_changed(self, name):
+        source = next((s for s in self.store.sources if s.name == name), None)
+        if source is None:
+            self.refresh()
+            return
+        for combo, value in [
+            (self.crs_combo, source.crs),
+            (self.resolution_combo, self._resolution(source)),
+            (self.extent_combo, source.extent),
+            (self.format_combo, self._classify_format(source)),
+        ]:
+            combo.blockSignals(True)
+            self._set_combo_value(combo, value)
+            combo.blockSignals(False)
+        self.refresh()
 
     def _classify_format(self, source) -> str:
         suffix = Path(source.path).suffix.lower()
@@ -174,6 +226,7 @@ class DataPage(QWidget):
         )
         if path:
             source = self.store.add_source(path)
+            self._refresh_reference_combo()
             self.refresh()
             self.statusMessage.emit(source.summary())
 
@@ -194,6 +247,7 @@ class DataPage(QWidget):
         for row in rows:
             if row < len(self.store.sources):
                 self.store.remove_source(self.store.sources[row].path)
+        self._refresh_reference_combo()
         self.refresh()
         self.statusMessage.emit(f"已移除：{'、'.join(names)}")
 
