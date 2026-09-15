@@ -238,6 +238,10 @@ class SpatialValidationWindow(QMainWindow):
                 return
             parameters = dict(parameters)
             parameters["shp_path"] = shp_path
+            # 每个项目独立输出目录，避免结果 SHP 相互覆盖
+            parameters["output_dir"] = str(
+                self.engine.project_dir / ".runtime" / "attribute_results" / f"run_{len(self.runs) + 1}"
+            )
             self._last_analysis_shp_path = shp_path
         self.latest_parameters = parameters
         self.set_status(f"正在运行 {parameters.get('backend', '算法')}...")
@@ -258,13 +262,28 @@ class SpatialValidationWindow(QMainWindow):
     def _analysis_finished(self, result):
         self.analysis_progress.setVisible(False)
         self.latest_result = result
+        if result.status != "error" and self.latest_parameters.get("analysis_type") != "raster":
+            self._render_scatter_for_result(result)
         self.results_page.update_result(result)
         self.workbench_page.update_result(result, self._last_analysis_shp_path)
         if result.status == "error":
             self.set_status(f"分析失败：{result.message}")
         else:
             self._add_run(result)
+            # 自动加载结果 SHP 到地图，方便直接分层设色查看
+            output_shp = getattr(result, "output_shp", "") or ""
+            if output_shp and Path(output_shp).exists():
+                self.workbench_page.load_shp(output_shp, reset_xy=False)
             self.set_status(f"分析完成：{result.engine}")
+
+    def _render_scatter_for_result(self, result):
+        x = self.latest_parameters.get("independent_variable", "")
+        y = self.latest_parameters.get("dependent_variable", "")
+        if not (x and y and self._last_analysis_shp_path):
+            return
+        out_path = self.engine.project_dir / ".runtime" / f"scatter_{len(self.runs) + 1}.png"
+        if self.workbench_page.render_scatter_png(self._last_analysis_shp_path, x, y, str(out_path)):
+            result.artifacts["scatter"] = str(out_path)
 
     @Slot()
     def _analysis_thread_finished(self):

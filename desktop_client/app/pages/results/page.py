@@ -2,12 +2,12 @@
 from pathlib import Path
 
 from ...qt_compat import (
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPixmap,
     QPushButton,
-    QFrame,
-    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QTabWidget,
@@ -33,9 +33,10 @@ class ResultsPage(QWidget):
         self.metric_card_widgets = []
         self.artifacts_text = None
         self.chart_tabs = None
-        self.scatter_box = None
         self.scatter_label = None
         self._scatter_path = ""
+        self.local_specs = []
+        self.local_labels = {}
         self._build()
 
     def _build(self):
@@ -44,8 +45,11 @@ class ResultsPage(QWidget):
         root.setSpacing(12)
         root.addWidget(self._global_summary_panel())
         root.addWidget(self._local_summary_panel())
-        root.addWidget(self._charts_panel())
-        root.addWidget(self._report_panel(), 1)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
+        bottom.addWidget(self._charts_panel(), 3)
+        bottom.addWidget(self._report_panel(), 2)
+        root.addLayout(bottom, 1)
 
     def _global_summary_panel(self):
         panel, body = panel_box("GLOBAL MODEL", "全局模型摘要")
@@ -65,41 +69,46 @@ class ResultsPage(QWidget):
 
     def _local_summary_panel(self):
         panel, body = panel_box("LOCAL SUMMARY", "局部统计摘要")
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        for text in ["局部 R²：—（中位数 —）", "回归系数：—", "显著区域占比：—"]:
-            item = QLabel(text)
-            item.setStyleSheet("background: #f1f8f5; border: 1px solid #dbece7; border-radius: 6px; padding: 10px;")
-            row.addWidget(item, 1)
-        body.addLayout(row)
+        self.local_specs = [
+            ("local_r2_median", "局部 R² 中位数"),
+            ("coefficient_median", "回归系数中位数"),
+            ("local_corr_median", "局部相关系数中位数"),
+            ("lme_median", "LME 中位数"),
+            ("lmae_median", "LMAE 中位数"),
+            ("lmre_median", "LMRE 中位数"),
+            ("lrmse_median", "LRMSE 中位数"),
+        ]
+        self.local_labels = {}
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        for i, (key, prefix) in enumerate(self.local_specs):
+            item = QLabel(f"{prefix}：—")
+            item.setStyleSheet("background: #f1f8f5; border: 1px solid #dbece7; border-radius: 6px; padding: 8px;")
+            grid.addWidget(item, i // 4, i % 4)
+            self.local_labels[key] = (item, prefix)
+        body.addLayout(grid)
         return panel
 
     def _charts_panel(self):
-        panel, body = panel_box("CHARTS", "图表")
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
         self.chart_tabs = QTabWidget()
         scatter_page = QWidget()
-        scatter_layout = QHBoxLayout(scatter_page)
-        scatter_layout.setContentsMargins(0, 0, 0, 0)
-        scatter_layout.addStretch()
-        self.scatter_box = QFrame()
-        self.scatter_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.scatter_box.setStyleSheet(
-            "QFrame { background: #ffffff; border: 1px solid #dfe8e6; border-radius: 6px; }"
-        )
-        box_layout = QVBoxLayout(self.scatter_box)
-        box_layout.setContentsMargins(10, 10, 10, 10)
-        self.scatter_label = QLabel("运行栅格分析并生成散点图后，这里会显示图片")
+        scatter_layout = QVBoxLayout(scatter_page)
+        scatter_layout.setContentsMargins(8, 8, 8, 8)
+        self.scatter_label = QLabel("运行分析并生成散点图后，这里会显示图片")
         self.scatter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scatter_label.setStyleSheet("background: transparent; border: 0;")
-        box_layout.addWidget(self.scatter_label)
-        scatter_layout.addWidget(self.scatter_box)
-        scatter_layout.addStretch()
+        self.scatter_label.setMinimumSize(320, 240)
+        self.scatter_label.setStyleSheet("background: #ffffff; border: 1px solid #dfe8e6; border-radius: 6px;")
+        scatter_layout.addWidget(self.scatter_label)
         self.chart_tabs.addTab(scatter_page, "散点图")
         for name in ["误差直方图", "局部 R² 直方图", "系数直方图", "专题图"]:
             placeholder = QLabel("该图表暂未生成")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.chart_tabs.addTab(placeholder, name)
-        body.addWidget(self.chart_tabs)
+        layout.addWidget(self.chart_tabs)
         return panel
 
     def _report_panel(self):
@@ -138,7 +147,10 @@ class ResultsPage(QWidget):
             if card is not None:
                 value = result.metrics.get(key, result.metrics.get(title, "—"))
                 card.update_value(value, result.engine)
-        self._scatter_path = result.artifacts.get("raster_scatter", "")
+        for key, (label, prefix) in self.local_labels.items():
+            value = result.metrics.get(key, "—")
+            label.setText(f"{prefix}：{value}")
+        self._scatter_path = result.artifacts.get("scatter", result.artifacts.get("raster_scatter", ""))
         self._refresh_scatter_image()
         artifact_paths = list(result.artifacts.values())
         if artifact_paths:
@@ -152,29 +164,23 @@ class ResultsPage(QWidget):
         )
 
     def _refresh_scatter_image(self):
-        if not self.scatter_box or not self.scatter_label:
+        if not self.scatter_label:
             return
         if not self._scatter_path or not Path(self._scatter_path).exists():
-            self.scatter_box.setFixedSize(420, 220)
             self.scatter_label.setPixmap(QPixmap())
             self.scatter_label.setText("本次分析没有生成散点图")
             return
         pixmap = QPixmap(self._scatter_path)
         if pixmap.isNull():
             return
-        page_width = self.width() or 1200
-        target_width = max(360, int(page_width * 0.5))
-        content_width = target_width - 22
-        content_height = max(220, round(content_width * pixmap.height() / pixmap.width()))
-        self.scatter_box.setFixedSize(target_width, content_height + 22)
-        self.scatter_label.setFixedSize(content_width, content_height)
-        self.scatter_label.setPixmap(pixmap.scaled(
-            content_width,
-            content_height,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        ))
         self.scatter_label.setText("")
+        size = self.scatter_label.size()
+        if size.width() > 0 and size.height() > 0:
+            self.scatter_label.setPixmap(pixmap.scaled(
+                size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

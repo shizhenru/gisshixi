@@ -21,7 +21,7 @@ from ...qt_compat import (
     Qt,
     Signal,
 )
-from ...widgets import ChartWindow, DroppableTable, MapCanvas, clear_layout, fill_table, panel_box
+from ...widgets import ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
 from core.io.readers import read_attributes
 from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
 from core.symbology import FIELD_INFO, auto_colors, classify
@@ -336,11 +336,35 @@ class WorkbenchPage(QWidget):
             "symbology_classes": self.symbology_classes_spin.value(),
         }
 
+    def render_scatter_png(self, shp_path, x_field, y_field, out_path):
+        """把 X vs Y 散点图渲染成 PNG 图片，返回是否成功。"""
+        from core.io.readers import read_attributes
+        data = read_attributes(shp_path, limit=0)
+        fields = data["fields"]
+        if x_field not in fields or y_field not in fields:
+            return False
+        ix, iy = fields.index(x_field), fields.index(y_field)
+        xs, ys = [], []
+        for row in data["rows"]:
+            x, y = row[ix], row[iy]
+            if x is not None and y is not None and isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                xs.append(x)
+                ys.append(y)
+        if len(xs) < 2:
+            return False
+        canvas = ScatterCanvas()
+        canvas.setStyleSheet("font-size: 18px;")
+        canvas.resize(1400, 1400)
+        canvas.set_data(xs, ys, x_field, y_field)
+        return canvas.grab().save(out_path, "PNG")
+
     def restore_run(self, run):
         p = run.parameters
-        # 1. 加载数据（会刷新字段下拉框与默认 X/Y）
-        if run.shp_path:
-            self.load_shp(run.shp_path)
+        # 1. 加载结果 SHP（含结果列，方便分层设色），否则加载源 SHP
+        result_shp = getattr(run.result, "output_shp", "") or ""
+        load_path = result_shp if (result_shp and Path(result_shp).exists()) else run.shp_path
+        if load_path:
+            self.load_shp(load_path)
         # 2. 参数面板回填
         self._set_combo(self.x_combo, p.get("independent_variable", ""))
         self._set_combo(self.y_combo, p.get("dependent_variable", ""))
@@ -444,7 +468,7 @@ class WorkbenchPage(QWidget):
     def run(self):
         self.runRequested.emit(self.collect_parameters())
 
-    def load_shp(self, path):
+    def load_shp(self, path, reset_xy=True):
         from core.io.readers import read_shapefile_geometry
         if Path(path).suffix.lower() != ".shp":
             self.statusMessage.emit("仅支持 SHP 几何显示")
@@ -463,7 +487,8 @@ class WorkbenchPage(QWidget):
                 self._map_values[f].append(row[c] if c < len(row) else None)
         self.map_canvas.load_shapes(geometry)
         self._refresh_symbology_fields()
-        self._refresh_xy_from_map()
+        if reset_xy:
+            self._refresh_xy_from_map()
         self._refresh_chart_window()
         self.statusMessage.emit(f"已加载 {len(geometry['geometries']):,} 个几何要素到地图")
 

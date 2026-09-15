@@ -54,25 +54,48 @@ class DraggableSourceLabel(QLabel):
 
 
 class ClickableRunLabel(QLabel):
-    """可点击（切换）、可双击（重命名）的项目名称标签。"""
+    """项目名称标签：点击切换、双击重命名、拖拽到地图显示 SHP。"""
 
     clicked = Signal(int)
     doubleClicked = Signal(int)
 
-    def __init__(self, text, index, parent=None):
+    def __init__(self, text, index, shp_path="", parent=None):
         super().__init__(text, parent)
         self._index = index
+        self._shp_path = shp_path
+        self._drag_start = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self._index)
+            self._drag_start = event.position().toPoint()
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            if (event.position().toPoint() - self._drag_start).manhattanLength() >= QApplication.startDragDistance():
+                self._start_drag()
+                self._drag_start = None
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_start is not None:
+            self._drag_start = None
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.clicked.emit(self._index)
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.doubleClicked.emit(self._index)
         super().mouseDoubleClickEvent(event)
+
+    def _start_drag(self):
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(MIME_SOURCE_PATH, self._shp_path.encode("utf-8"))
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
 
 
 class DataSelectDialog(QDialog):
@@ -233,8 +256,9 @@ class DataSelectionPanel(QWidget):
             marker.setFixedWidth(12)
             marker.setStyleSheet("color: #2d8c7c; font-weight: 700;")
             row.addWidget(marker)
-            name = ClickableRunLabel(run.name, i)
-            name.setToolTip("点击切换 · 双击重命名")
+            drag_path = getattr(run.result, "output_shp", "") or run.shp_path
+            name = ClickableRunLabel(run.name, i, drag_path)
+            name.setToolTip("点击切换 · 双击重命名 · 拖拽到地图显示")
             if i == self._current_index:
                 name.setStyleSheet("font-weight: 700; color: #1e655b;")
             name.clicked.connect(self._on_run_clicked)
