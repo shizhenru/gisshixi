@@ -35,6 +35,8 @@ class AnalysisEngine:
                     message=payload.get("message", "栅格分析完成"),
                     output_path=str(output_path),
                     local_values=payload.get("local_values", []),
+                    output_dir=payload.get("output_dir", ""),
+                    artifacts=payload.get("artifacts", {}),
                 )
             if backend.startswith("混合"):
                 return AnalysisResult(

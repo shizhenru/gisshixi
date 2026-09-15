@@ -166,6 +166,7 @@ class SpatialValidationWindow(QMainWindow):
         self.data_panel.refresh()
         if key == "workspace":
             self.workbench_page._refresh_variable_options()
+            self.workbench_page.update_after_data_change()
         elif key == "preprocess":
             self.preprocess_page.update_after_data_change()
         for name, button in self.nav_buttons.items():
@@ -199,6 +200,10 @@ class SpatialValidationWindow(QMainWindow):
                 self.set_status("栅格分析至少需要两个已导入的栅格数据集")
                 return
             parameters = dict(parameters)
+            selected_paths = [parameters.get("reference_path"), parameters.get("comparison_path")]
+            selected_paths = [path for path in selected_paths if path]
+            if len(selected_paths) == 2 and selected_paths[0] != selected_paths[1]:
+                raster_paths = selected_paths
             manifest = RasterPreprocessor(self.store.project_dir).latest_manifest()
             aligned = (manifest or {}).get("processed", [])
             aligned_by_source = {item.get("source_path"): item.get("aligned_path") for item in aligned}

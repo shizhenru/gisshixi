@@ -17,3 +17,9 @@ class MetricCard(QFrame):
         layout.addWidget(title_label)
         layout.addWidget(value_label)
         layout.addWidget(note_label)
+        self.value_label = value_label
+        self.note_label = note_label
+
+    def update_value(self, value, note=""):
+        self.value_label.setText(str(value))
+        self.note_label.setText(note)

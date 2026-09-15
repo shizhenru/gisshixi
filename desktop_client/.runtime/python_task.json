@@ -1,6 +1,6 @@
 {
-  "dependent_variable": "name",
-  "independent_variable": "name",
+  "dependent_variable": "pop2024",
+  "independent_variable": "pop2024",
   "kernel": "双平方核",
   "bandwidth": "25",
   "bandwidth_mode": "自适应带宽",
@@ -8,5 +8,6 @@
   "backend": "Python 占位算法",
   "analysis_type": "attribute",
   "auto_bandwidth": false,
-  "shp_path": "C:\\Users\\19840\\Desktop\\gis\\data\\2024_pop_result.shp"
+  "write_shp": true,
+  "shp_path": "D:\\37\\这是一个严肃的文件夹\\学习资料\\大四上\\2024_pop_result.shp"
 }

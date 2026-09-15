@@ -52,6 +52,26 @@ class AnalysisParameters:
 
 
 @dataclass
+class RasterAnalysisParameters:
+    window_size: int = 5
+    resampling: str = "bilinear"
+    zero_epsilon: float = 1e-12
+    scatter_max_points: int = 50000
+    write_local_rasters: bool = True
+    write_scatter_plot: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "window_size": self.window_size,
+            "resampling": self.resampling,
+            "zero_epsilon": self.zero_epsilon,
+            "scatter_max_points": self.scatter_max_points,
+            "write_local_rasters": self.write_local_rasters,
+            "write_scatter_plot": self.write_scatter_plot,
+        }
+
+
+@dataclass
 class AnalysisResult:
     status: str = "ready"
     engine: str = "未运行"
@@ -61,3 +81,5 @@ class AnalysisResult:
     local_values: list[float] = field(default_factory=list)
     local_columns: dict = field(default_factory=dict)
     output_shp: str = ""
+    output_dir: str = ""
+    artifacts: dict[str, str] = field(default_factory=dict)

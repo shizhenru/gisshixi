@@ -19,7 +19,7 @@
 界面采用「顶部导航 + 左侧数据选择 + 主内容」结构，五个栏目各司其职：
 
 | 栏目 | 职责 |
-|------|------|
+| ------ | ------ |
 | 工作台 | 设置 GWR 模型参数（因变量 Y / 自变量 X / 核函数 / 带宽 / 带宽策略 / 距离度量 / 算法后端）并运行，展示结果地图、散点图与属性表 |
 | 数据管理 | 设定项目统一参数（坐标系 / 分辨率 / 研究区范围 / 数据格式），登记多源数据并做一致性检查（与统一参数不符的项标红） |
 | 预处理 | 工具箱式界面：工具目录 + 参数面板 + 运行历史，已接入栅格对齐（统一 CRS / 分辨率 / 范围） |
@@ -88,7 +88,7 @@ desktop_client/                              # Qt 桌面客户端（项目运行
 `core/` 是整个后端，内部又分几块：
 
 | 模块 | 作用 |
-|------|------|
+| ------ | ------ |
 | `models.py` / `project.py` / `io/` | 数据：数据结构、数据源存储、数据读写 |
 | `raster_processing.py` | 业务：栅格预处理 |
 | `engine.py` | 调度：把「算法名」分发到对应的 runner + 脚本 |
@@ -213,7 +213,7 @@ Rscript requirements.R
 R 包清单见 `desktop_client/requirements.R`（`requirements.txt` 中也有备注）。按算法需要安装：
 
 | R 包 | 用途 |
-|------|------|
+| ------ | ------ |
 | `jsonlite` | 所有 R 算法适配器读取配置、写出 JSON 结果（必需） |
 | `sf`、`GWmodel`、`sp` | 属性数据 GWR（「R 属性 GWR」后端） |
 | `terra` | 栅格分析（「栅格 R / terra」后端） |
@@ -252,8 +252,10 @@ R 包清单见 `desktop_client/requirements.R`（`requirements.txt` 中也有备
 R 脚本接收以下参数：
 
 ```text
-Rscript desktop_raster_terra_analysis.R reference comparison output_dir [window_size] [scatter_max_points]
+Rscript desktop_raster_terra_analysis.R config.json output.json
 ```
+
+栅格分析与属性 GWR 使用相同的 JSON 任务接口。客户端会把参考栅格、对比栅格、局部窗口、重采样方法和输出选项写入 `config.json`，R 脚本将统一指标、局部样本和产物路径写入 `output.json`。栅格对齐优先由 Python `rasterio` 预处理完成，`terra` 负责统计与结果输出。
 
 结果写入 `desktop_client/.runtime/raster_analysis/`，包括：
 
@@ -287,7 +289,7 @@ Rscript desktop_raster_terra_analysis.R reference comparison output_dir [window_
 - **脚本（算法实现）**：负责「算什么」，按数据模式分类放在 `core/algorithms/scripts/` 下。
 
 | 数据模式 | 脚本目录 | 当前算法 | 使用的 runner |
-|---------|---------|---------|--------------|
+| --------- | --------- | --------- | -------------- |
 | 属性数据 | `scripts/attribute/` | `gwr_placeholder.py` / `.R`（占位）、`gwr_attribute.R`（真实 GWR） | `python_runner` / `r_runner` |
 | 栅格数据 | `scripts/raster/`（脚本暂在 `../栅格数据算法/`） | `desktop_raster_terra_analysis.R` | `raster_runner` |
 | 几何数据 | `scripts/geometry/`（待新增） | 未实现 | 复用或新增 runner |
@@ -336,7 +338,7 @@ Rscript desktop_raster_terra_analysis.R reference comparison output_dir [window_
 ### core 层文件说明
 
 | 文件 | 职责 | 什么时候用 |
-|------|------|-----------|
+| ------ | ------ | ----------- |
 | `models.py` | 数据模型：`DataSource` / `AnalysisParameters` / `AnalysisResult` | 描述数据源、传分析参数、接收结果 |
 | `project.py` | `ProjectStore`：数据源增删与持久化（`.runtime/sources.json`） | 导入 / 删除数据、拿数据源列表 |
 | `engine.py` | `AnalysisEngine`：按 backend 分发给 Python / R / 栅格算法 | 运行分析任务 |

@@ -23,6 +23,8 @@ class ResultsPage(QWidget):
         super().__init__(parent)
         self.result = result or AnalysisResult()
         self.report_text = None
+        self.metric_cards = {}
+        self.artifacts_text = None
         self._build()
 
     def _build(self):
@@ -43,7 +45,9 @@ class ResultsPage(QWidget):
             ("ME", "—"), ("MAE", "—"), ("RMSE", "—"), ("相关系数", "—"),
         ]
         for title, value in metrics:
-            row.addWidget(MetricCard(title, value, "暂无结果"))
+            card = MetricCard(title, value, "暂无结果")
+            self.metric_cards[title] = card
+            row.addWidget(card)
         body.addLayout(row)
         return panel
 
@@ -76,6 +80,10 @@ class ResultsPage(QWidget):
         self.report_text.setReadOnly(True)
         self.report_text.setPlainText("运行分析后，将在此处展示全局评价指标、局部空间差异说明与可复现的分析摘要。")
         body.addWidget(self.report_text, 1)
+        self.artifacts_text = QLabel("输出文件：暂无")
+        self.artifacts_text.setObjectName("Muted")
+        self.artifacts_text.setWordWrap(True)
+        body.addWidget(self.artifacts_text)
         export = QPushButton("↓ 生成报告")
         export.setObjectName("PrimaryButton")
         export.clicked.connect(self.exportRequested.emit)
@@ -84,6 +92,21 @@ class ResultsPage(QWidget):
 
     def update_result(self, result: AnalysisResult):
         self.result = result
+        metric_names = {
+            "ME": "me", "MAE": "mae", "RMSE": "rmse",
+            "相关系数": "correlation", "有效像元": "valid_cells",
+        }
+        for title, key in metric_names.items():
+            card = self.metric_cards.get(title)
+            if card is not None:
+                value = result.metrics.get(key, result.metrics.get(title, "—"))
+                card.update_value(value, result.engine)
+        artifact_paths = list(result.artifacts.values())
+        if artifact_paths:
+            self.artifacts_text.setText("输出文件：" + "、".join(artifact_paths))
+        elif result.output_dir:
+            self.artifacts_text.setText(f"输出目录：{result.output_dir}")
         self.report_text.setPlainText(
-            f"执行引擎：{result.engine}\n任务状态：{result.status}\n运行信息：{result.message}"
+            f"执行引擎：{result.engine}\n任务状态：{result.status}\n运行信息：{result.message}\n"
+            f"输出目录：{result.output_dir or '—'}"
         )

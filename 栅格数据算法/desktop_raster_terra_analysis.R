@@ -1,17 +1,22 @@
-suppressPackageStartupMessages({
-  library(terra)
-})
-
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 3) {
-  stop("Usage: Rscript desktop_raster_terra_analysis.R reference comparison output_dir [window_size] [scatter_max_points]")
+if (length(args) < 2) {
+  stop("Usage: Rscript desktop_raster_terra_analysis.R config.json output.json")
 }
-
-reference_file <- args[[1]]
-comparison_file <- args[[2]]
-output_dir <- args[[3]]
-window_size <- if (length(args) >= 4) as.integer(args[[4]]) else 5L
-scatter_max_points <- if (length(args) >= 5) as.integer(args[[5]]) else 50000L
+if (!requireNamespace("jsonlite", quietly = TRUE)) stop("请先安装 R 包 jsonlite")
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
+config <- jsonlite::fromJSON(args[[1]])
+result_path <- args[[2]]
+reference_file <- config$reference_path
+comparison_file <- config$comparison_path
+output_dir <- config$output_dir
+window_size <- as.integer(config$window_size %||% 5L)
+scatter_max_points <- as.integer(config$scatter_max_points %||% 50000L)
+zero_epsilon <- as.numeric(config$zero_epsilon %||% 1e-12)
+write_local_rasters <- isTRUE(config$write_local_rasters %||% TRUE)
+write_scatter_plot <- isTRUE(config$write_scatter_plot %||% TRUE)
+resampling <- config$resampling %||% "bilinear"
+if (!requireNamespace("terra", quietly = TRUE)) stop("请先安装 R 包 terra")
+suppressPackageStartupMessages(library(terra))
 if (!file.exists(reference_file) || !file.exists(comparison_file)) stop("栅格输入文件不存在")
 if (is.na(window_size) || window_size < 3 || window_size %% 2 != 1) stop("window_size 必须是大于等于 3 的奇数")
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
@@ -34,7 +39,7 @@ safe_rms_from_squared <- function(x, ...) {
   sqrt(mean(x))
 }
 safe_mre <- function(reference, comparison) {
-  ok <- is.finite(reference) & is.finite(comparison) & abs(reference) > 1e-12
+  ok <- is.finite(reference) & is.finite(comparison) & abs(reference) > zero_epsilon
   if (!any(ok)) return(NA_real_)
   mean(abs((reference[ok] - comparison[ok]) / reference[ok]))
 }
@@ -51,7 +56,7 @@ comparison <- rast(comparison_file)
 if (nlyr(reference) != 1 || nlyr(comparison) != 1) stop("每个栅格必须只包含一个波段")
 names(reference) <- "reference"
 names(comparison) <- "comparison"
-comparison_aligned <- project(comparison, reference, method = "bilinear")
+comparison_aligned <- project(comparison, reference, method = resampling)
 names(comparison_aligned) <- "comparison"
 
 valid_mask <- ifel(is.finite(reference) & is.finite(comparison_aligned), 1, NA)
@@ -78,7 +83,7 @@ global_metrics <- data.frame(
 write.csv(global_metrics, file.path(output_dir, "global_metrics.csv"),
           row.names = FALSE, fileEncoding = "UTF-8")
 
-if (requireNamespace("ggplot2", quietly = TRUE) && length(reference_values) >= 3) {
+if (write_scatter_plot && requireNamespace("ggplot2", quietly = TRUE) && length(reference_values) >= 3) {
   set.seed(20260914)
   draw_index <- seq_along(reference_values)
   if (length(draw_index) > scatter_max_points) draw_index <- sample(draw_index, scatter_max_points)
@@ -97,16 +102,18 @@ if (requireNamespace("ggplot2", quietly = TRUE) && length(reference_values) >= 3
 window <- matrix(1, nrow = window_size, ncol = window_size)
 difference <- reference_valid - comparison_valid
 absolute_difference <- abs(difference)
-relative_difference <- ifel(abs(reference_valid) > 1e-12,
+relative_difference <- ifel(abs(reference_valid) > zero_epsilon,
                             absolute_difference / abs(reference_valid), NA)
 local_me <- focal(difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
 local_mae <- focal(absolute_difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
 local_mre <- focal(relative_difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
 local_rmse <- focal(difference^2, w = window, fun = safe_rms_from_squared, na.rm = FALSE, fill = NA)
-write_result(local_me, "local_ME.tif")
-write_result(local_mae, "local_MAE.tif")
-write_result(local_mre, "local_MRE.tif")
-write_result(local_rmse, "local_RMSE.tif")
+if (write_local_rasters) {
+  write_result(local_me, "local_ME.tif")
+  write_result(local_mae, "local_MAE.tif")
+  write_result(local_mre, "local_MRE.tif")
+  write_result(local_rmse, "local_RMSE.tif")
+}
 
 local_n <- focal(valid_mask, w = window, fun = sum, na.rm = TRUE, fill = NA)
 local_x <- focal(comparison_valid, w = window, fun = sum, na.rm = TRUE, fill = NA)
@@ -127,29 +134,41 @@ local_r2 <- ifel(local_n >= 2 & local_y2 > 1e-12,
 local_correlation <- ifel(local_correlation < -1, -1,
                           ifel(local_correlation > 1, 1, local_correlation))
 local_r2 <- ifel(local_r2 < 0, 0, ifel(local_r2 > 1, 1, local_r2))
-write_result(local_correlation, "local_correlation.tif")
-write_result(local_coefficient, "local_coefficient_no_intercept.tif")
-write_result(local_r2, "local_R2_no_intercept.tif")
-write_result(reference_valid, "reference_aligned.tif")
-write_result(comparison_valid, "comparison_aligned.tif")
+if (write_local_rasters) {
+  write_result(local_correlation, "local_correlation.tif")
+  write_result(local_coefficient, "local_coefficient_no_intercept.tif")
+  write_result(local_r2, "local_R2_no_intercept.tif")
+  write_result(reference_valid, "reference_aligned.tif")
+  write_result(comparison_valid, "comparison_aligned.tif")
+}
 local_preview <- values(local_mae, mat = FALSE)
 local_preview <- local_preview[is.finite(local_preview)]
 local_preview <- head(local_preview, 1000)
 
-result_json <- paste0(
-  "{",
-  "\"status\":\"success\",",
-  "\"engine\":\"R / terra\",",
-  "\"message\":\"栅格异源同质分析完成\",",
-  "\"metrics\":{",
-  "\"me\":", json_number(me), ",",
-  "\"mae\":", json_number(mae), ",",
-  "\"mre\":", json_number(mre), ",",
-  "\"rmse\":", json_number(rmse), ",",
-  "\"correlation\":", json_number(correlation), ",",
-  "\"valid_cells\":", length(reference_values),
-  "},",
-  "\"local_values\":[", paste(sprintf("%.6f", local_preview), collapse = ","), "]",
-  "}"
+artifact_names <- character()
+if (write_local_rasters) {
+  artifact_names <- c(
+    "local_ME.tif", "local_MAE.tif", "local_MRE.tif", "local_RMSE.tif",
+    "local_correlation.tif", "local_coefficient_no_intercept.tif",
+    "local_R2_no_intercept.tif", "reference_aligned.tif", "comparison_aligned.tif"
+  )
+}
+if (write_scatter_plot && file.exists(file.path(output_dir, "raster_scatter.png"))) {
+  artifact_names <- c(artifact_names, "raster_scatter.png")
+}
+artifacts <- as.list(file.path(output_dir, artifact_names))
+names(artifacts) <- tools::file_path_sans_ext(artifact_names)
+result <- list(
+  status = "success",
+  engine = "R / terra",
+  message = "栅格异源同质分析完成",
+  metrics = list(
+    me = me, mae = mae, mre = mre, rmse = rmse,
+    correlation = correlation, valid_cells = length(reference_values)
+  ),
+  output_dir = output_dir,
+  artifacts = artifacts,
+  local_values = local_preview
 )
-writeLines(result_json, file.path(output_dir, "result.json"), useBytes = TRUE)
+jsonlite::write_json(result, result_path, auto_unbox = TRUE, pretty = TRUE, na = "null")
+jsonlite::write_json(result, file.path(output_dir, "result.json"), auto_unbox = TRUE, pretty = TRUE, na = "null")

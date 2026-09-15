@@ -12,6 +12,7 @@ from ...qt_compat import (
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QDoubleSpinBox,
     QTabWidget,
     QToolTip,
     QVBoxLayout,
@@ -21,7 +22,7 @@ from ...qt_compat import (
 )
 from ...widgets import ChartWindow, DroppableTable, MapCanvas, clear_layout, fill_table, panel_box
 from core.io.readers import read_attributes
-from core.models import AnalysisParameters, AnalysisResult
+from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
 from core.symbology import FIELD_INFO, auto_colors, classify
 
 
@@ -72,6 +73,9 @@ class WorkbenchPage(QWidget):
         self._map_values = {}
         self.field_info_label = None
         self._chart_window = None
+        self.raster_reference_combo = None
+        self.raster_comparison_combo = None
+        self.raster_options = None
         self._build()
 
     def _build(self):
@@ -227,6 +231,46 @@ class WorkbenchPage(QWidget):
             body, "算法后端",
             ["Python 占位算法", "R 占位算法", "R 属性 GWR", "栅格 R / terra"],
         )
+        self.raster_options = QWidget()
+        raster_layout = QVBoxLayout(self.raster_options)
+        raster_layout.setContentsMargins(0, 8, 0, 0)
+        raster_layout.setSpacing(8)
+        raster_layout.addWidget(QLabel("参考栅格"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_reference_combo = QComboBox()
+        self.raster_reference_combo.setFixedHeight(32)
+        raster_layout.addWidget(self.raster_reference_combo)
+        raster_layout.addWidget(QLabel("对比栅格"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_comparison_combo = QComboBox()
+        self.raster_comparison_combo.setFixedHeight(32)
+        raster_layout.addWidget(self.raster_comparison_combo)
+        raster_layout.addWidget(QLabel("局部窗口大小"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_window_spin = QSpinBox()
+        self.raster_window_spin.setRange(3, 99)
+        self.raster_window_spin.setSingleStep(2)
+        self.raster_window_spin.setValue(5)
+        raster_layout.addWidget(self.raster_window_spin)
+        raster_layout.addWidget(QLabel("重采样方法"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_resampling_combo = QComboBox()
+        self.raster_resampling_combo.addItems(["bilinear", "near", "cubic"])
+        self.raster_resampling_combo.setFixedHeight(32)
+        raster_layout.addWidget(self.raster_resampling_combo)
+        raster_layout.addWidget(QLabel("相对误差零值阈值"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_epsilon_spin = QDoubleSpinBox()
+        self.raster_epsilon_spin.setDecimals(12)
+        self.raster_epsilon_spin.setRange(0.0, 1.0)
+        self.raster_epsilon_spin.setSingleStep(1e-12)
+        self.raster_epsilon_spin.setValue(1e-12)
+        raster_layout.addWidget(self.raster_epsilon_spin)
+        self.raster_local_checkbox = QCheckBox("输出局部 GeoTIFF")
+        self.raster_local_checkbox.setChecked(True)
+        raster_layout.addWidget(self.raster_local_checkbox)
+        self.raster_scatter_checkbox = QCheckBox("输出像元散点图")
+        self.raster_scatter_checkbox.setChecked(True)
+        raster_layout.addWidget(self.raster_scatter_checkbox)
+        body.addWidget(self.raster_options)
+        self.backend_combo.currentTextChanged.connect(self._toggle_raster_options)
+        self._refresh_raster_options()
+        self._toggle_raster_options(self.backend_combo.currentText())
         self.save_result_shp = QCheckBox("运行后生成结果 SHP")
         self.save_result_shp.setChecked(True)
         body.addWidget(self.save_result_shp)
@@ -272,6 +316,38 @@ class WorkbenchPage(QWidget):
                 if index >= 0:
                     combo.setCurrentIndex(index)
 
+    def _refresh_raster_options(self):
+        if self.raster_reference_combo is None:
+            return
+        current_reference = self.raster_reference_combo.currentData()
+        current_comparison = self.raster_comparison_combo.currentData()
+        self.raster_reference_combo.clear()
+        self.raster_comparison_combo.clear()
+        raster_sources = [
+            source for source in self.store.sources
+            if "栅格" in source.data_type or Path(source.path).suffix.lower() in {".tif", ".tiff", ".img", ".asc"}
+        ]
+        for source in raster_sources:
+            self.raster_reference_combo.addItem(source.name, source.path)
+            self.raster_comparison_combo.addItem(source.name, source.path)
+        if current_reference:
+            index = self.raster_reference_combo.findData(current_reference)
+            if index >= 0:
+                self.raster_reference_combo.setCurrentIndex(index)
+        if current_comparison:
+            index = self.raster_comparison_combo.findData(current_comparison)
+            if index >= 0:
+                self.raster_comparison_combo.setCurrentIndex(index)
+        if self.raster_comparison_combo.count() > 1 and self.raster_comparison_combo.currentIndex() == 0:
+            self.raster_comparison_combo.setCurrentIndex(1)
+
+    def _toggle_raster_options(self, backend):
+        is_raster = backend.startswith("栅格")
+        self.raster_options.setVisible(is_raster)
+        save_result_shp = getattr(self, "save_result_shp", None)
+        if save_result_shp is not None:
+            save_result_shp.setVisible(not is_raster)
+
     def collect_parameters(self) -> dict:
         parameters = AnalysisParameters(
             dependent_variable=self.y_combo.currentText(),
@@ -282,11 +358,22 @@ class WorkbenchPage(QWidget):
             distance_metric=self.distance_combo.currentText(),
             backend=self.backend_combo.currentText(),
         ).to_dict()
+        is_raster = self.backend_combo.currentText().startswith("栅格")
         parameters.update({
-            "analysis_type": "raster" if self.backend_combo.currentText().startswith("栅格") else "attribute",
+            "analysis_type": "raster" if is_raster else "attribute",
             "auto_bandwidth": self.auto_bandwidth.isChecked(),
             "write_shp": self.save_result_shp.isChecked(),
         })
+        if is_raster:
+            parameters.update(RasterAnalysisParameters(
+                window_size=self.raster_window_spin.value(),
+                resampling=self.raster_resampling_combo.currentText(),
+                zero_epsilon=self.raster_epsilon_spin.value(),
+                write_local_rasters=self.raster_local_checkbox.isChecked(),
+                write_scatter_plot=self.raster_scatter_checkbox.isChecked(),
+            ).to_dict())
+            parameters["reference_path"] = self.raster_reference_combo.currentData() or ""
+            parameters["comparison_path"] = self.raster_comparison_combo.currentData() or ""
         return parameters
 
     def run(self):
@@ -540,3 +627,6 @@ class WorkbenchPage(QWidget):
             self._show_results(shp_path, result.local_columns)
             self.tabs.setCurrentIndex(1)
         self.statusMessage.emit(result.message)
+
+    def update_after_data_change(self):
+        self._refresh_raster_options()

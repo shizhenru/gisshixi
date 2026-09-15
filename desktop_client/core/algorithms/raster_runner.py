@@ -27,7 +27,11 @@ class RasterTerraRunner(AlgorithmRunner):
         raise FileNotFoundError("未找到 Rscript.exe，请在系统设置中配置 Rscript 路径")
 
     def run(self, config: dict[str, Any], output_path: Path) -> dict[str, Any]:
-        raster_paths = config.get("raster_paths") or []
+        raster_paths = config.get("raster_paths") or [
+            config.get("reference_path"),
+            config.get("comparison_path"),
+        ]
+        raster_paths = [path for path in raster_paths if path]
         if len(raster_paths) < 2:
             raise ValueError("栅格异源同质分析至少需要两个栅格数据集")
 
@@ -44,15 +48,15 @@ class RasterTerraRunner(AlgorithmRunner):
             target = temp_inputs / f"input_{index}{source.suffix.lower()}"
             shutil.copy2(source, target)
             safe_inputs.append(target)
-        args = [
-            *self._command(),
-            str(self.script_path),
-            str(safe_inputs[0]),
-            str(safe_inputs[1]),
-            str(temp_dir),
-            str(int(config.get("window_size", 5))),
-            str(int(config.get("scatter_max_points", 50000))),
-        ]
+        task_config = dict(config)
+        task_config.update({
+            "reference_path": str(safe_inputs[0]),
+            "comparison_path": str(safe_inputs[1]),
+            "output_dir": str(temp_dir),
+        })
+        config_path = temp_dir / "raster_task.json"
+        config_path.write_text(json.dumps(task_config, ensure_ascii=False, indent=2), encoding="utf-8")
+        args = [*self._command(), str(self.script_path), str(config_path), str(output_path)]
         completed = subprocess.run(
             args,
             capture_output=True,
@@ -69,11 +73,19 @@ class RasterTerraRunner(AlgorithmRunner):
             if not result_file.exists():
                 raise RuntimeError("栅格 R 算法未生成 result.json")
             result = json.loads(result_file.read_text(encoding="utf-8"))
+            artifacts = {}
             for artifact in temp_dir.iterdir():
                 target = result_dir / artifact.name
                 if artifact.is_file():
                     shutil.copy2(artifact, target)
+                    artifacts[artifact.stem] = str(target)
             result["output_dir"] = str(result_dir)
+            result["artifacts"] = {
+                key: str(result_dir / Path(value).name)
+                for key, value in result.get("artifacts", {}).items()
+                if (result_dir / Path(value).name).exists()
+            }
+            result["artifacts"].update(artifacts)
             result["stdout"] = completed.stdout[-2000:]
             output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             return result
