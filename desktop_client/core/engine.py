@@ -24,7 +24,7 @@ class AnalysisEngine:
     def run(self, parameters: dict[str, Any]) -> AnalysisResult:
         output_path = self.project_dir / ".runtime" / "analysis_result.json"
         output_path.parent.mkdir(exist_ok=True)
-        backend = parameters.get("backend", "Python 占位算法")
+        backend = parameters.get("backend", "R 属性 GWR")
         try:
             if parameters.get("analysis_type") == "raster" or backend.startswith("栅格"):
                 payload = self.raster_runner.run(parameters, output_path)

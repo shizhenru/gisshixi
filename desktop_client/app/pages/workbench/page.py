@@ -217,20 +217,19 @@ class WorkbenchPage(QWidget):
         self.bandwidth_input = QLineEdit("25")
         self.bandwidth_input.setFixedWidth(80)
         self.bandwidth_input.setFixedHeight(32)
-        bw_unit = QLabel("近邻")
-        bw_unit.setObjectName("Muted")
+        self.bw_unit = QLabel("近邻")
+        self.bw_unit.setObjectName("Muted")
         bw_row.addWidget(self.bandwidth_input)
-        bw_row.addWidget(bw_unit)
+        bw_row.addWidget(self.bw_unit)
         self.auto_bandwidth = QCheckBox("自动（AIC）")
         bw_row.addWidget(self.auto_bandwidth)
         bw_row.addStretch()
         body.addLayout(bw_row)
 
-        self.bandwidth_mode_combo = self._add_select(body, "带宽策略", ["自适应带宽", "固定带宽"])
-        self.distance_combo = self._add_select(body, "距离度量", ["投影坐标距离（米）", "大圆距离（千米）"])
+        self.bandwidth_mode_combo = self._add_select(body, "带宽含义", ["最近邻个数", "距离（米）"])
         self.backend_combo = self._add_select(
             body, "算法后端",
-            ["Python 占位算法", "R 占位算法", "R 属性 GWR", "栅格 R / terra"],
+            ["R 属性 GWR", "栅格 R / terra"],
         )
         self.raster_options = QWidget()
         raster_layout = QVBoxLayout(self.raster_options)
@@ -276,6 +275,8 @@ class WorkbenchPage(QWidget):
         self.save_result_shp.setChecked(True)
         body.addWidget(self.save_result_shp)
         self._refresh_variable_options()
+        self.bandwidth_mode_combo.currentTextChanged.connect(self._update_bandwidth_unit)
+        self._update_bandwidth_unit()
 
         # 运行按钮固定在滚动区外，始终可见
         run_button = QPushButton("▶ 运行")
@@ -316,6 +317,52 @@ class WorkbenchPage(QWidget):
             "QAbstractItemView { background: #ffffff; color: #26363c; "
             "selection-background-color: #e3f3ef; selection-color: #1f695e; }"
         )
+
+    def _update_bandwidth_unit(self, *_):
+        if self.bandwidth_mode_combo.currentText() == "距离（米）":
+            self.bw_unit.setText("米")
+        else:
+            self.bw_unit.setText("近邻")
+
+    @staticmethod
+    def _set_combo(combo, text):
+        if text and combo.findText(text) >= 0:
+            combo.setCurrentText(text)
+
+    def get_symbology_state(self):
+        return {
+            "symbology_field": self.symbology_field_combo.currentText(),
+            "symbology_method": self.symbology_method_combo.currentText(),
+            "symbology_classes": self.symbology_classes_spin.value(),
+        }
+
+    def restore_run(self, run):
+        p = run.parameters
+        # 1. 加载数据（会刷新字段下拉框与默认 X/Y）
+        if run.shp_path:
+            self.load_shp(run.shp_path)
+        # 2. 参数面板回填
+        self._set_combo(self.x_combo, p.get("independent_variable", ""))
+        self._set_combo(self.y_combo, p.get("dependent_variable", ""))
+        self._set_combo(self.kernel_combo, p.get("kernel", "双平方核"))
+        self.bandwidth_input.setText(str(p.get("bandwidth", "25")))
+        self.auto_bandwidth.setChecked(bool(p.get("auto_bandwidth", False)))
+        self._set_combo(self.bandwidth_mode_combo, p.get("bandwidth_mode", "最近邻个数"))
+        self._set_combo(self.backend_combo, p.get("backend", "R 属性 GWR"))
+        self.save_result_shp.setChecked(bool(p.get("write_shp", True)))
+        self._update_bandwidth_unit()
+        # 3. 设色还原
+        if run.symbology_field:
+            self._set_combo(self.symbology_field_combo, run.symbology_field)
+        self._set_combo(self.symbology_method_combo, run.symbology_method)
+        self.symbology_classes_spin.setValue(run.symbology_classes)
+        self._apply_symbology()
+        # 4. 结果回填属性表
+        self.latest_result = run.result
+        self._result_output_shp = getattr(run.result, "output_shp", "") or ""
+        if run.result.local_columns and run.shp_path:
+            self._show_results(run.shp_path, run.result.local_columns)
+        self.tabs.setCurrentIndex(0)
 
     def _refresh_variable_options(self):
         """根据已导入数据的字段刷新 Y / X 变量下拉框。"""
@@ -374,7 +421,6 @@ class WorkbenchPage(QWidget):
             kernel=self.kernel_combo.currentText(),
             bandwidth=self.bandwidth_input.text(),
             bandwidth_mode=self.bandwidth_mode_combo.currentText(),
-            distance_metric=self.distance_combo.currentText(),
             backend=self.backend_combo.currentText(),
         ).to_dict()
         is_raster = self.backend_combo.currentText().startswith("栅格")

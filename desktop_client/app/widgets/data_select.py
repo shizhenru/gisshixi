@@ -3,6 +3,7 @@ from ..qt_compat import (
     QApplication,
     QDialog,
     QDrag,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -52,6 +53,28 @@ class DraggableSourceLabel(QLabel):
         drag.exec(Qt.DropAction.CopyAction)
 
 
+class ClickableRunLabel(QLabel):
+    """可点击（切换）、可双击（重命名）的项目名称标签。"""
+
+    clicked = Signal(int)
+    doubleClicked = Signal(int)
+
+    def __init__(self, text, index, parent=None):
+        super().__init__(text, parent)
+        self._index = index
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._index)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.doubleClicked.emit(self._index)
+        super().mouseDoubleClickEvent(event)
+
+
 class DataSelectDialog(QDialog):
     """从已导入的数据目录中勾选要展示到工作台的数据。"""
 
@@ -91,15 +114,21 @@ class DataSelectDialog(QDialog):
 
 
 class DataSelectionPanel(QWidget):
-    """左侧数据选择区：展示工作集数据，支持勾选与移除。"""
+    """左侧数据选择区：上方数据源，下方项目（工作区）列表。"""
 
     statusMessage = Signal(str)
+    runSelected = Signal(int)
+    runDeleteRequested = Signal(int)
+    runRenameRequested = Signal(int)
 
     def __init__(self, store, parent=None):
         super().__init__(parent)
         self.store = store
         self.display_sources = list(store.sources)
         self.source_body = None
+        self.run_body = None
+        self.runs = []
+        self._current_index = -1
         self._build()
 
     def _build(self):
@@ -115,6 +144,19 @@ class DataSelectionPanel(QWidget):
         select_button.setObjectName("OutlineButton")
         select_button.clicked.connect(self._select_data)
         root.addWidget(select_button)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("color: #dfe8e6;")
+        root.addWidget(separator)
+        projects_label = QLabel("项目")
+        projects_label.setObjectName("Kicker")
+        root.addWidget(projects_label)
+        self.run_body = QVBoxLayout()
+        self.run_body.setSpacing(4)
+        root.addLayout(self.run_body)
+        root.addStretch(1)
+
         self.refresh()
 
     def refresh(self):
@@ -168,3 +210,46 @@ class DataSelectionPanel(QWidget):
         self.display_sources = [s for s in self.display_sources if s.path != source.path]
         self.refresh()
         self.statusMessage.emit(f"已从工作区移除：{source.name}")
+
+    def set_runs(self, runs, current_index=-1):
+        self.runs = list(runs)
+        self._current_index = current_index
+        self._refresh_runs()
+
+    def _refresh_runs(self):
+        if self.run_body is None:
+            return
+        clear_layout(self.run_body)
+        if not self.runs:
+            empty = QLabel("暂无项目\n（运行分析后自动加入）")
+            empty.setObjectName("Muted")
+            empty.setWordWrap(True)
+            self.run_body.addWidget(empty)
+            return
+        for i, run in enumerate(self.runs):
+            row = QHBoxLayout()
+            row.setSpacing(5)
+            marker = QLabel("▸" if i == self._current_index else " ")
+            marker.setFixedWidth(12)
+            marker.setStyleSheet("color: #2d8c7c; font-weight: 700;")
+            row.addWidget(marker)
+            name = ClickableRunLabel(run.name, i)
+            name.setToolTip("点击切换 · 双击重命名")
+            if i == self._current_index:
+                name.setStyleSheet("font-weight: 700; color: #1e655b;")
+            name.clicked.connect(self._on_run_clicked)
+            name.doubleClicked.connect(self._on_run_double_clicked)
+            row.addWidget(name, 1)
+            delete_btn = QPushButton("×")
+            delete_btn.setObjectName("GhostButton")
+            delete_btn.setFixedWidth(22)
+            delete_btn.setToolTip("删除项目")
+            delete_btn.clicked.connect(lambda checked=False, idx=i: self.runDeleteRequested.emit(idx))
+            row.addWidget(delete_btn)
+            self.run_body.addLayout(row)
+
+    def _on_run_clicked(self, index):
+        self.runSelected.emit(index)
+
+    def _on_run_double_clicked(self, index):
+        self.runRenameRequested.emit(index)

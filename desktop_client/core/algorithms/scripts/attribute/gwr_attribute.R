@@ -51,7 +51,7 @@ KERNEL <- switch(config$kernel %||% "双平方核",
   "双平方核" = "bisquare", "高斯核" = "gaussian", "指数核" = "exponential",
   "bisquare" = "bisquare", "gaussian" = "gaussian", "exponential" = "exponential",
   "bisquare")
-ADAPTIVE <- identical(config$bandwidth_mode %||% "自适应带宽", "自适应带宽")
+ADAPTIVE <- identical(config$bandwidth_mode %||% "最近邻个数", "最近邻个数")
 AUTO_BW  <- isTRUE(config$auto_bandwidth)
 BW       <- suppressWarnings(as.numeric(config$bandwidth %||% "25"))
 if (is.na(BW) || BW <= 0) BW <- 25

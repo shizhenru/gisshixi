@@ -13,6 +13,7 @@ from .qt_compat import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QPushButton,
@@ -31,7 +32,7 @@ from .theme import APP_STYLE
 from .widgets import DataSelectionPanel
 from core.engine import AnalysisEngine
 from core.io.exporters import export_report
-from core.models import AnalysisResult
+from core.models import AnalysisResult, AnalysisRun
 from core.project import ProjectStore
 from core.raster_processing import RasterPreprocessor
 
@@ -77,6 +78,7 @@ class SpatialValidationWindow(QMainWindow):
         self._analysis_thread = None
         self._analysis_worker = None
         self._last_analysis_shp_path = None
+        self.runs = []
         self.nav_buttons = {}
         self._build()
 
@@ -172,6 +174,9 @@ class SpatialValidationWindow(QMainWindow):
         self.settings_page.statusMessage.connect(self.set_status)
         self.settings_page.rscriptChanged.connect(self._set_rscript_path)
         self.results_page.exportRequested.connect(self.export_current_report)
+        self.data_panel.runSelected.connect(self._switch_run)
+        self.data_panel.runDeleteRequested.connect(self._delete_run)
+        self.data_panel.runRenameRequested.connect(self._rename_run)
 
     def navigate(self, key):
         self.stack.setCurrentWidget(self.pages[key])
@@ -256,6 +261,7 @@ class SpatialValidationWindow(QMainWindow):
         if result.status == "error":
             self.set_status(f"分析失败：{result.message}")
         else:
+            self._add_run(result)
             self.set_status(f"分析完成：{result.engine}")
 
     @Slot()
@@ -273,3 +279,54 @@ class SpatialValidationWindow(QMainWindow):
                 "message": self.latest_result.message,
             }, self.latest_parameters)
             self.set_status(f"报告已导出：{Path(path).name}")
+
+    def _add_run(self, result):
+        y = self.latest_parameters.get("dependent_variable", "")
+        x = self.latest_parameters.get("independent_variable", "")
+        if self.latest_parameters.get("analysis_type") == "raster":
+            name = f"栅格分析 · #{len(self.runs) + 1}"
+        elif y and x:
+            name = f"{y} vs {x} · #{len(self.runs) + 1}"
+        else:
+            name = f"分析 · #{len(self.runs) + 1}"
+        sym = self.workbench_page.get_symbology_state()
+        run = AnalysisRun(
+            name=name,
+            parameters=dict(self.latest_parameters),
+            result=result,
+            shp_path=self._last_analysis_shp_path or "",
+            symbology_field=sym["symbology_field"],
+            symbology_method=sym["symbology_method"],
+            symbology_classes=sym["symbology_classes"],
+        )
+        self.runs.append(run)
+        self.data_panel.set_runs(self.runs, len(self.runs) - 1)
+
+    def _switch_run(self, index):
+        if not (0 <= index < len(self.runs)):
+            return
+        run = self.runs[index]
+        self.latest_result = run.result
+        self.latest_parameters = run.parameters
+        self._last_analysis_shp_path = run.shp_path
+        self.workbench_page.restore_run(run)
+        self.results_page.update_result(run.result)
+        self.data_panel.set_runs(self.runs, index)
+        self.set_status(f"已切换到项目：{run.name}")
+
+    def _delete_run(self, index):
+        if not (0 <= index < len(self.runs)):
+            return
+        name = self.runs[index].name
+        del self.runs[index]
+        self.data_panel.set_runs(self.runs, -1)
+        self.set_status(f"已删除项目：{name}")
+
+    def _rename_run(self, index):
+        if not (0 <= index < len(self.runs)):
+            return
+        name, ok = QInputDialog.getText(self, "重命名项目", "新名称：", text=self.runs[index].name)
+        if ok and name.strip():
+            self.runs[index].name = name.strip()
+            self.data_panel.set_runs(self.runs, index)
+            self.set_status(f"已重命名为：{name.strip()}")

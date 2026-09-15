@@ -35,9 +35,8 @@ class AnalysisParameters:
     independent_variable: str = ""
     kernel: str = "双平方核"
     bandwidth: float = 0.62
-    bandwidth_mode: str = "自适应带宽"
-    distance_metric: str = "投影坐标距离（米）"
-    backend: str = "Python 占位算法"
+    bandwidth_mode: str = "最近邻个数"
+    backend: str = "R 属性 GWR"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,7 +45,6 @@ class AnalysisParameters:
             "kernel": self.kernel,
             "bandwidth": self.bandwidth,
             "bandwidth_mode": self.bandwidth_mode,
-            "distance_metric": self.distance_metric,
             "backend": self.backend,
         }
 
@@ -83,3 +81,15 @@ class AnalysisResult:
     output_shp: str = ""
     output_dir: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class AnalysisRun:
+    """一次分析运行（会话工作区中的临时项目）。"""
+    name: str = ""
+    parameters: dict = field(default_factory=dict)
+    result: AnalysisResult = field(default_factory=AnalysisResult)
+    shp_path: str = ""
+    symbology_field: str = ""
+    symbology_method: str = "自然间断点"
+    symbology_classes: int = 5
