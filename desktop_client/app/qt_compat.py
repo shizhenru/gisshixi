@@ -1,6 +1,6 @@
 try:
     from PySide6.QtCore import QMimeData, QObject, QPointF, QRectF, QSettings, QThread, Qt, Signal, Slot
-    from PySide6.QtGui import QColor, QDrag, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
+    from PySide6.QtGui import QColor, QDrag, QFont, QFontDatabase, QPainter, QPen, QBrush, QPalette, QPixmap, QPolygonF, QTransform
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -23,6 +23,7 @@ try:
         QPushButton,
         QProgressBar,
         QScrollArea,
+        QScrollArea,
         QSizePolicy,
         QSlider,
         QSpinBox,
@@ -39,7 +40,7 @@ try:
     QT_BINDING = "PySide6"
 except ImportError:
     from PyQt6.QtCore import QMimeData, QObject, QPointF, QRectF, QSettings, QThread, Qt, pyqtSignal as Signal, pyqtSlot as Slot
-    from PyQt6.QtGui import QColor, QDrag, QFont, QFontDatabase, QPainter, QPen, QBrush, QPolygonF, QTransform
+    from PyQt6.QtGui import QColor, QDrag, QFont, QFontDatabase, QPainter, QPen, QBrush, QPalette, QPixmap, QPolygonF, QTransform
     from PyQt6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -61,6 +62,7 @@ except ImportError:
         QMessageBox,
         QPushButton,
         QProgressBar,
+        QScrollArea,
         QScrollArea,
         QSizePolicy,
         QSlider,

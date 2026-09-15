@@ -5,6 +5,22 @@ QMainWindow, QWidget {
     font-family: "DengXian", "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 12px;
 }
+QLabel {
+    background: transparent;
+}
+QTabWidget::pane, QTabBar {
+    background: transparent;
+}
+QTabBar::tab {
+    color: #52666b;
+    background: transparent;
+    border: 0;
+    padding: 7px 12px;
+}
+QTabBar::tab:selected {
+    color: #1f695e;
+    background: #e3f3ef;
+}
 QFrame#TopBar {
     background: #ffffff;
     border-bottom: 1px solid #dfe8e6;

@@ -10,6 +10,7 @@ from ...qt_compat import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPalette,
     QPushButton,
     QSpinBox,
     QDoubleSpinBox,
@@ -295,8 +296,26 @@ class WorkbenchPage(QWidget):
         combo.setFixedHeight(32)
         if items:
             combo.addItems(items)
+        self._style_combo(combo)
         body.addWidget(combo)
         return combo
+
+    @staticmethod
+    def _style_combo(combo):
+        palette = combo.palette()
+        palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#26363c"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#26363c"))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor("#e3f3ef"))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#1f695e"))
+        combo.setPalette(palette)
+        view = combo.view()
+        view.setPalette(palette)
+        view.setStyleSheet(
+            "QAbstractItemView { background: #ffffff; color: #26363c; "
+            "selection-background-color: #e3f3ef; selection-color: #1f695e; }"
+        )
 
     def _refresh_variable_options(self):
         """根据已导入数据的字段刷新 Y / X 变量下拉框。"""

@@ -16,6 +16,7 @@ from .qt_compat import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QProgressBar,
     QSettings,
     QStackedWidget,
     QThread,
@@ -122,7 +123,18 @@ class SpatialValidationWindow(QMainWindow):
         self.status_label = QLabel("就绪")
         self.status_label.setObjectName("Muted")
         self.status_label.setStyleSheet("padding: 7px 28px; background: #ffffff; border-top: 1px solid #dfe8e6;")
-        root_layout.addWidget(self.status_label)
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.addWidget(self.status_label, 1)
+        self.analysis_progress = QProgressBar()
+        self.analysis_progress.setRange(0, 0)
+        self.analysis_progress.setFixedWidth(220)
+        self.analysis_progress.setVisible(False)
+        status_row.addWidget(self.analysis_progress)
+        status_widget = QWidget()
+        status_widget.setLayout(status_row)
+        status_widget.setStyleSheet("background: #ffffff; border-top: 1px solid #dfe8e6;")
+        root_layout.addWidget(status_widget)
         self.setCentralWidget(root)
         self._connect_signals()
         self.navigate("workspace")
@@ -222,6 +234,7 @@ class SpatialValidationWindow(QMainWindow):
             self._last_analysis_shp_path = shp_path
         self.latest_parameters = parameters
         self.set_status(f"正在运行 {parameters.get('backend', '算法')}...")
+        self.analysis_progress.setVisible(True)
         self._analysis_thread = QThread(self)
         self._analysis_worker = AnalysisWorker(self.engine, parameters)
         self._analysis_worker.moveToThread(self._analysis_thread)
@@ -236,6 +249,7 @@ class SpatialValidationWindow(QMainWindow):
 
     @Slot(object)
     def _analysis_finished(self, result):
+        self.analysis_progress.setVisible(False)
         self.latest_result = result
         self.results_page.update_result(result)
         self.workbench_page.update_result(result, self._last_analysis_shp_path)
