@@ -14,7 +14,19 @@ class RasterTerraRunner(AlgorithmRunner):
 
     def __init__(self, script_path: Path, rscript_path: str = ""):
         self.script_path = script_path
-        self.rscript_path = rscript_path or shutil.which("Rscript") or ""
+        self.rscript_path = rscript_path or self._find_rscript()
+
+    @staticmethod
+    def _find_rscript() -> str:
+        found = shutil.which("Rscript")
+        if found:
+            return found
+        candidates = []
+        for root in (Path("C:/Program Files/R"), Path("C:/Program Files (x86)/R")):
+            if root.exists():
+                candidates.extend(root.glob("R-*/bin/x64/Rscript.exe"))
+                candidates.extend(root.glob("R-*/bin/Rscript.exe"))
+        return str(sorted(candidates, reverse=True)[0]) if candidates else ""
 
     def _command(self) -> list[str]:
         if self.rscript_path:
@@ -41,7 +53,7 @@ class RasterTerraRunner(AlgorithmRunner):
         temp_inputs = temp_dir / "inputs"
         temp_inputs.mkdir()
         safe_inputs = []
-        for index, raster_path in enumerate(raster_paths[:2], start=1):
+        for index, raster_path in enumerate(raster_paths, start=1):
             source = Path(raster_path)
             if not source.exists():
                 raise FileNotFoundError(f"栅格输入文件不存在：{source}")
@@ -52,6 +64,7 @@ class RasterTerraRunner(AlgorithmRunner):
         task_config.update({
             "reference_path": str(safe_inputs[0]),
             "comparison_path": str(safe_inputs[1]),
+            "raster_paths": [str(path) for path in safe_inputs],
             "output_dir": str(temp_dir),
         })
         config_path = temp_dir / "raster_task.json"

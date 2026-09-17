@@ -78,6 +78,7 @@ class AnalysisResult:
     output_path: str = ""
     local_values: list[float] = field(default_factory=list)
     local_columns: dict = field(default_factory=dict)
+    pairwise_metrics: dict = field(default_factory=dict)
     output_shp: str = ""
     output_dir: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)

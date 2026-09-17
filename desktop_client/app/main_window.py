@@ -210,23 +210,20 @@ class SpatialValidationWindow(QMainWindow):
             return
         self._last_analysis_shp_path = None
         if parameters.get("analysis_type") == "raster":
-            raster_paths = [
-                source.path for source in self.store.sources
-                if "栅格" in source.data_type
-                or Path(source.path).suffix.lower() in {".tif", ".tiff", ".img", ".asc"}
-            ]
+            raster_paths = [path for path in parameters.get("raster_paths", []) if path]
             if len(raster_paths) < 2:
-                self.set_status("栅格分析至少需要两个已导入的栅格数据集")
+                self.set_status("栅格分析至少需要选择两个栅格数据集")
                 return
             parameters = dict(parameters)
-            selected_paths = [parameters.get("reference_path"), parameters.get("comparison_path")]
-            selected_paths = [path for path in selected_paths if path]
-            if len(selected_paths) == 2 and selected_paths[0] != selected_paths[1]:
-                raster_paths = selected_paths
             manifest = RasterPreprocessor(self.store.project_dir).latest_manifest()
             aligned = (manifest or {}).get("processed", [])
             aligned_by_source = {item.get("source_path"): item.get("aligned_path") for item in aligned}
             parameters["raster_paths"] = [aligned_by_source.get(path, path) for path in raster_paths]
+            source_by_path = {source.path: source for source in self.store.sources}
+            parameters["raster_names"] = [
+                source_by_path[path].name if path in source_by_path else Path(path).stem
+                for path in raster_paths
+            ]
         elif parameters.get("analysis_type") == "attribute":
             shp_path = next(
                 (source.path for source in self.store.sources

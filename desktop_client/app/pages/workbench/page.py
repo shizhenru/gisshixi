@@ -10,6 +10,8 @@ from ...qt_compat import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPalette,
     QPushButton,
     QSpinBox,
@@ -24,6 +26,7 @@ from ...qt_compat import (
 from ...widgets import ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
 from core.io.readers import read_attributes
 from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
+from core.raster_processing import RasterPreprocessor
 from core.symbology import FIELD_INFO, auto_colors, classify
 
 
@@ -74,8 +77,7 @@ class WorkbenchPage(QWidget):
         self._map_values = {}
         self.field_info_label = None
         self._chart_window = None
-        self.raster_reference_combo = None
-        self.raster_comparison_combo = None
+        self.raster_list = None
         self.raster_options = None
         self._build()
 
@@ -236,16 +238,11 @@ class WorkbenchPage(QWidget):
         raster_layout = QVBoxLayout(self.raster_options)
         raster_layout.setContentsMargins(0, 8, 0, 0)
         raster_layout.setSpacing(8)
-        raster_layout.addWidget(QLabel("参考栅格"), 0, Qt.AlignmentFlag.AlignLeft)
-        self.raster_reference_combo = QComboBox()
-        self.raster_reference_combo.setFixedHeight(32)
-        self._style_combo(self.raster_reference_combo)
-        raster_layout.addWidget(self.raster_reference_combo)
-        raster_layout.addWidget(QLabel("对比栅格"), 0, Qt.AlignmentFlag.AlignLeft)
-        self.raster_comparison_combo = QComboBox()
-        self.raster_comparison_combo.setFixedHeight(32)
-        self._style_combo(self.raster_comparison_combo)
-        raster_layout.addWidget(self.raster_comparison_combo)
+        raster_layout.addWidget(QLabel("分析栅格（至少选择两个）"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_list = QListWidget()
+        self.raster_list.setMinimumHeight(90)
+        self.raster_list.setMaximumHeight(160)
+        raster_layout.addWidget(self.raster_list)
         raster_layout.addWidget(QLabel("局部窗口大小"), 0, Qt.AlignmentFlag.AlignLeft)
         self.raster_window_spin = QSpinBox()
         self.raster_window_spin.setRange(3, 99)
@@ -411,29 +408,38 @@ class WorkbenchPage(QWidget):
                     combo.setCurrentIndex(index)
 
     def _refresh_raster_options(self):
-        if self.raster_reference_combo is None:
+        if self.raster_list is None:
             return
-        current_reference = self.raster_reference_combo.currentData()
-        current_comparison = self.raster_comparison_combo.currentData()
-        self.raster_reference_combo.clear()
-        self.raster_comparison_combo.clear()
+        current_selected = self._selected_raster_paths()
+        manifest = RasterPreprocessor(self.store.project_dir).latest_manifest() or {}
+        if not current_selected:
+            current_selected = set(manifest.get("selected_sources", []))
         raster_sources = [
             source for source in self.store.sources
             if "栅格" in source.data_type or Path(source.path).suffix.lower() in {".tif", ".tiff", ".img", ".asc"}
         ]
+        if not current_selected:
+            current_selected = {source.path for source in raster_sources}
+        self.raster_list.blockSignals(True)
+        self.raster_list.clear()
         for source in raster_sources:
-            self.raster_reference_combo.addItem(source.name, source.path)
-            self.raster_comparison_combo.addItem(source.name, source.path)
-        if current_reference:
-            index = self.raster_reference_combo.findData(current_reference)
-            if index >= 0:
-                self.raster_reference_combo.setCurrentIndex(index)
-        if current_comparison:
-            index = self.raster_comparison_combo.findData(current_comparison)
-            if index >= 0:
-                self.raster_comparison_combo.setCurrentIndex(index)
-        if self.raster_comparison_combo.count() > 1 and self.raster_comparison_combo.currentIndex() == 0:
-            self.raster_comparison_combo.setCurrentIndex(1)
+            item = QListWidgetItem(f"{source.icon}  {source.name} · {source.records}")
+            item.setData(Qt.ItemDataRole.UserRole, source.path)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if source.path in current_selected else Qt.CheckState.Unchecked
+            )
+            self.raster_list.addItem(item)
+        self.raster_list.blockSignals(False)
+
+    def _selected_raster_paths(self):
+        if self.raster_list is None:
+            return []
+        return [
+            self.raster_list.item(index).data(Qt.ItemDataRole.UserRole)
+            for index in range(self.raster_list.count())
+            if self.raster_list.item(index).checkState() == Qt.CheckState.Checked
+        ]
 
     def _toggle_raster_options(self, backend):
         is_raster = backend.startswith("栅格")
@@ -465,8 +471,7 @@ class WorkbenchPage(QWidget):
                 write_local_rasters=self.raster_local_checkbox.isChecked(),
                 write_scatter_plot=self.raster_scatter_checkbox.isChecked(),
             ).to_dict())
-            parameters["reference_path"] = self.raster_reference_combo.currentData() or ""
-            parameters["comparison_path"] = self.raster_comparison_combo.currentData() or ""
+            parameters["raster_paths"] = list(self._selected_raster_paths())
         return parameters
 
     def run(self):

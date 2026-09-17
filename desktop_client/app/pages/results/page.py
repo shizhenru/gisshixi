@@ -284,7 +284,10 @@ class ResultsPage(QWidget):
         for key, (label, prefix) in self.local_labels.items():
             value = result.metrics.get(key, "—")
             label.setText(str(value))
-        self._scatter_path = result.artifacts.get("scatter", result.artifacts.get("raster_scatter", ""))
+        self._scatter_path = result.artifacts.get(
+            "raster_scatter_matrix",
+            result.artifacts.get("scatter", result.artifacts.get("raster_scatter", "")),
+        )
         self._refresh_scatter_image()
         if self._scatter_preview is not None and self._scatter_preview.isVisible():
             self._scatter_preview.set_image(self._scatter_path)
@@ -294,9 +297,16 @@ class ResultsPage(QWidget):
             self.artifacts_text.setText("输出文件：\n" + "\n".join(visible_paths))
         elif result.output_dir:
             self.artifacts_text.setText(f"输出目录：{result.output_dir}")
+        pairwise_note = ""
+        if result.pairwise_metrics:
+            pairwise_note = "\n两两比较：\n" + "\n".join(
+                f"{key}: 有效像元 {values.get('valid_cells', '—')}，"
+                f"RMSE {values.get('rmse', '—')}，相关系数 {values.get('correlation', '—')}"
+                for key, values in result.pairwise_metrics.items()
+            )
         self.report_text.setPlainText(
             f"执行引擎：{result.engine}\n任务状态：{result.status}\n运行信息：{result.message}\n"
-            f"输出目录：{result.output_dir or '—'}"
+            f"输出目录：{result.output_dir or '—'}{pairwise_note}"
         )
 
     def _refresh_scatter_image(self):

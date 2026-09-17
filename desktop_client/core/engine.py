@@ -35,6 +35,7 @@ class AnalysisEngine:
                     message=payload.get("message", "栅格分析完成"),
                     output_path=str(output_path),
                     local_values=payload.get("local_values", []),
+                    pairwise_metrics=payload.get("pairwise_metrics", {}),
                     output_dir=payload.get("output_dir", ""),
                     artifacts=payload.get("artifacts", {}),
                 )

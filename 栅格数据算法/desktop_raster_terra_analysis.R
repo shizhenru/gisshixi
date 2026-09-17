@@ -3,11 +3,11 @@ if (length(args) < 2) {
   stop("Usage: Rscript desktop_raster_terra_analysis.R config.json output.json")
 }
 if (!requireNamespace("jsonlite", quietly = TRUE)) stop("请先安装 R 包 jsonlite")
+if (!requireNamespace("terra", quietly = TRUE)) stop("请先安装 R 包 terra")
+
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 config <- jsonlite::fromJSON(args[[1]])
 result_path <- args[[2]]
-reference_file <- config$reference_path
-comparison_file <- config$comparison_path
 output_dir <- config$output_dir
 window_size <- as.integer(config$window_size %||% 5L)
 scatter_max_points <- as.integer(config$scatter_max_points %||% 50000L)
@@ -15,12 +15,21 @@ zero_epsilon <- as.numeric(config$zero_epsilon %||% 1e-12)
 write_local_rasters <- isTRUE(config$write_local_rasters %||% TRUE)
 write_scatter_plot <- isTRUE(config$write_scatter_plot %||% TRUE)
 resampling <- config$resampling %||% "bilinear"
-if (!requireNamespace("terra", quietly = TRUE)) stop("请先安装 R 包 terra")
-suppressPackageStartupMessages(library(terra))
-if (!file.exists(reference_file) || !file.exists(comparison_file)) stop("栅格输入文件不存在")
-if (is.na(window_size) || window_size < 3 || window_size %% 2 != 1) stop("window_size 必须是大于等于 3 的奇数")
+
+raster_paths <- config$raster_paths %||% character()
+if (!length(raster_paths)) {
+  raster_paths <- c(config$reference_path %||% "", config$comparison_path %||% "")
+}
+raster_paths <- as.character(raster_paths[nzchar(raster_paths)])
+if (length(raster_paths) < 2) stop("栅格分析至少需要两个栅格数据集")
+if (any(!file.exists(raster_paths))) stop("栅格输入文件不存在")
+if (is.na(window_size) || window_size < 3 || window_size %% 2 != 1) {
+  stop("window_size 必须是大于等于 3 的奇数")
+}
+
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(file.path(output_dir, "temp"), showWarnings = FALSE, recursive = TRUE)
+suppressPackageStartupMessages(library(terra))
 terraOptions(tempdir = file.path(output_dir, "temp"))
 
 safe_mean <- function(x, ...) {
@@ -49,147 +58,193 @@ safe_mre <- function(reference, comparison) {
   mean(abs((reference[ok] - comparison[ok]) / reference[ok]))
 }
 json_number <- function(value) {
-  if (length(value) == 0 || !is.finite(value)) "null" else sprintf("%.12g", value)
+  if (length(value) == 0 || !is.finite(value)) NA_real_ else value
 }
 write_result <- function(x, filename) {
   writeRaster(x, file.path(output_dir, filename), overwrite = TRUE,
               filetype = "GTiff", gdal = c("COMPRESS=LZW"))
 }
-
-reference <- rast(reference_file)
-comparison <- rast(comparison_file)
-if (nlyr(reference) != 1 || nlyr(comparison) != 1) stop("每个栅格必须只包含一个波段")
-names(reference) <- "reference"
-names(comparison) <- "comparison"
-comparison_aligned <- project(comparison, reference, method = resampling)
-names(comparison_aligned) <- "comparison"
-
-valid_mask <- ifel(is.finite(reference) & is.finite(comparison_aligned), 1, NA)
-reference_valid <- mask(reference, valid_mask)
-comparison_valid <- mask(comparison_aligned, valid_mask)
-reference_values <- values(reference_valid, mat = FALSE)
-comparison_values <- values(comparison_valid, mat = FALSE)
-ok <- is.finite(reference_values) & is.finite(comparison_values)
-if (!any(ok)) stop("两个栅格没有重叠的有效像元")
-reference_values <- reference_values[ok]
-comparison_values <- comparison_values[ok]
-difference_values <- reference_values - comparison_values
-
-me <- safe_mean(difference_values)
-mae <- safe_mean(abs(difference_values))
-mre <- safe_mre(reference_values, comparison_values)
-rmse <- safe_rmse(difference_values)
-correlation <- if (length(reference_values) >= 2) cor(reference_values, comparison_values) else NA_real_
-
-global_metrics <- data.frame(
-  metric = c("ME", "MAE", "MRE", "RMSE", "Pearson_r", "valid_cells"),
-  value = c(me, mae, mre, rmse, correlation, length(reference_values))
-)
-write.csv(global_metrics, file.path(output_dir, "global_metrics.csv"),
-          row.names = FALSE, fileEncoding = "UTF-8")
-
-if (write_scatter_plot && requireNamespace("ggplot2", quietly = TRUE) && length(reference_values) >= 3) {
-  set.seed(20260914)
-  draw_index <- seq_along(reference_values)
-  if (length(draw_index) > scatter_max_points) draw_index <- sample(draw_index, scatter_max_points)
-  draw_data <- data.frame(comparison = comparison_values[draw_index],
-                          reference = reference_values[draw_index])
-  plot <- ggplot2::ggplot(draw_data, ggplot2::aes(comparison, reference)) +
-    ggplot2::geom_point(color = "#2C6E9E", alpha = 0.18, size = 0.7) +
-    ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
-    ggplot2::labs(title = "Raster pixel-level comparison",
-                  subtitle = paste0("valid cells: ", format(length(reference_values), big.mark = ",")),
-                  x = "Comparison", y = "Reference") +
-    ggplot2::theme_classic()
-  ggplot2::ggsave(file.path(output_dir, "raster_scatter.png"), plot, width = 7.2, height = 6.4, dpi = 180)
+safe_name <- function(value) {
+  value <- gsub("[^A-Za-z0-9_-]+", "_", value)
+  value <- gsub("^_+|_+$", "", value)
+  if (!nzchar(value)) "raster" else value
 }
+
+input_names <- config$raster_names %||% tools::file_path_sans_ext(basename(raster_paths))
+input_names <- as.character(input_names)
+if (length(input_names) != length(raster_paths)) {
+  input_names <- tools::file_path_sans_ext(basename(raster_paths))
+}
+input_names <- make.unique(vapply(input_names, safe_name, character(1)))
+
+rasters <- lapply(raster_paths, terra::rast)
+if (any(vapply(rasters, terra::nlyr, numeric(1)) != 1)) {
+  stop("每个栅格必须只包含一个波段")
+}
+reference_grid <- rasters[[1]]
+aligned <- vector("list", length(rasters))
+aligned[[1]] <- reference_grid
+if (length(rasters) > 1) {
+  for (index in 2:length(rasters)) {
+    aligned[[index]] <- terra::project(rasters[[index]], reference_grid, method = resampling)
+  }
+}
+names(aligned) <- input_names
 
 window <- matrix(1, nrow = window_size, ncol = window_size)
-difference <- reference_valid - comparison_valid
-absolute_difference <- abs(difference)
-relative_difference <- ifel(abs(reference_valid) > zero_epsilon,
-                            absolute_difference / abs(reference_valid), NA)
-local_me <- focal(difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
-local_mae <- focal(absolute_difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
-local_mre <- focal(relative_difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
-local_rmse <- focal(difference^2, w = window, fun = safe_rms_from_squared, na.rm = FALSE, fill = NA)
-if (write_local_rasters) {
-  write_result(local_me, "local_ME.tif")
-  write_result(local_mae, "local_MAE.tif")
-  write_result(local_mre, "local_MRE.tif")
-  write_result(local_rmse, "local_RMSE.tif")
-}
-
-local_n <- focal(valid_mask, w = window, fun = sum, na.rm = TRUE, fill = NA)
-local_x <- focal(comparison_valid, w = window, fun = sum, na.rm = TRUE, fill = NA)
-local_y <- focal(reference_valid, w = window, fun = sum, na.rm = TRUE, fill = NA)
-local_x2 <- focal(comparison_valid^2, w = window, fun = sum, na.rm = TRUE, fill = NA)
-local_y2 <- focal(reference_valid^2, w = window, fun = sum, na.rm = TRUE, fill = NA)
-local_xy <- focal(reference_valid * comparison_valid, w = window, fun = sum, na.rm = TRUE, fill = NA)
-local_x_var <- local_x2 - local_x^2 / local_n
-local_y_var <- local_y2 - local_y^2 / local_n
-local_cov <- local_xy - local_x * local_y / local_n
-local_correlation <- ifel(local_n >= 3 & local_x_var > 1e-12 & local_y_var > 1e-12,
-                           local_cov / sqrt(local_x_var * local_y_var), NA)
-local_coefficient <- ifel(local_n >= 2 & local_x2 > 1e-12, local_xy / local_x2, NA)
-local_residual_ss <- local_y2 - 2 * local_coefficient * local_xy +
-  local_coefficient^2 * local_x2
-local_r2 <- ifel(local_n >= 2 & local_y2 > 1e-12,
-                 1 - local_residual_ss / local_y2, NA)
-local_correlation <- ifel(local_correlation < -1, -1,
-                          ifel(local_correlation > 1, 1, local_correlation))
-local_r2 <- ifel(local_r2 < 0, 0, ifel(local_r2 > 1, 1, local_r2))
-if (write_local_rasters) {
-  write_result(local_correlation, "local_correlation.tif")
-  write_result(local_coefficient, "local_coefficient_no_intercept.tif")
-  write_result(local_r2, "local_R2_no_intercept.tif")
-  write_result(reference_valid, "reference_aligned.tif")
-  write_result(comparison_valid, "comparison_aligned.tif")
-}
-local_preview <- values(local_mae, mat = FALSE)
-local_preview <- local_preview[is.finite(local_preview)]
-local_preview <- head(local_preview, 1000)
-
 artifact_names <- character()
-if (write_local_rasters) {
-  artifact_names <- c(
-    "local_ME.tif", "local_MAE.tif", "local_MRE.tif", "local_RMSE.tif",
-    "local_correlation.tif", "local_coefficient_no_intercept.tif",
-    "local_R2_no_intercept.tif", "reference_aligned.tif", "comparison_aligned.tif"
-  )
+pairwise_metrics <- list()
+first_pair_metrics <- NULL
+first_local_preview <- numeric()
+
+for (left_index in seq_len(length(aligned) - 1L)) {
+  for (right_index in (left_index + 1L):length(aligned)) {
+    left <- aligned[[left_index]]
+    right <- aligned[[right_index]]
+    names(left) <- "left"
+    names(right) <- "right"
+    valid_mask <- ifel(is.finite(left) & is.finite(right), 1, NA)
+    left_valid <- mask(left, valid_mask)
+    right_valid <- mask(right, valid_mask)
+    left_values <- values(left_valid, mat = FALSE)
+    right_values <- values(right_valid, mat = FALSE)
+    ok <- is.finite(left_values) & is.finite(right_values)
+    if (!any(ok)) next
+    left_values <- left_values[ok]
+    right_values <- right_values[ok]
+    difference_values <- left_values - right_values
+    correlation <- if (length(left_values) >= 2) cor(left_values, right_values) else NA_real_
+    pair_key <- paste(input_names[left_index], input_names[right_index], sep = "__vs__")
+    pair_metrics <- list(
+      left = input_names[left_index],
+      right = input_names[right_index],
+      me = json_number(safe_mean(difference_values)),
+      mae = json_number(safe_mean(abs(difference_values))),
+      mre = json_number(safe_mre(left_values, right_values)),
+      rmse = json_number(safe_rmse(difference_values)),
+      correlation = json_number(correlation),
+      valid_cells = length(left_values)
+    )
+    pairwise_metrics[[pair_key]] <- pair_metrics
+    if (is.null(first_pair_metrics)) first_pair_metrics <- pair_metrics
+
+    if (write_local_rasters) {
+      prefix <- paste0(safe_name(input_names[left_index]), "__vs__", safe_name(input_names[right_index]))
+      difference <- left_valid - right_valid
+      absolute_difference <- abs(difference)
+      relative_difference <- ifel(abs(left_valid) > zero_epsilon,
+                                  absolute_difference / abs(left_valid), NA)
+      local_me <- focal(difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
+      local_mae <- focal(absolute_difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
+      local_mre <- focal(relative_difference, w = window, fun = safe_mean, na.rm = FALSE, fill = NA)
+      local_rmse <- focal(difference^2, w = window, fun = safe_rms_from_squared, na.rm = FALSE, fill = NA)
+      local_n <- focal(valid_mask, w = window, fun = sum, na.rm = TRUE, fill = NA)
+      local_x <- focal(right_valid, w = window, fun = sum, na.rm = TRUE, fill = NA)
+      local_y <- focal(left_valid, w = window, fun = sum, na.rm = TRUE, fill = NA)
+      local_x2 <- focal(right_valid^2, w = window, fun = sum, na.rm = TRUE, fill = NA)
+      local_y2 <- focal(left_valid^2, w = window, fun = sum, na.rm = TRUE, fill = NA)
+      local_xy <- focal(left_valid * right_valid, w = window, fun = sum, na.rm = TRUE, fill = NA)
+      local_x_var <- local_x2 - local_x^2 / local_n
+      local_y_var <- local_y2 - local_y^2 / local_n
+      local_cov <- local_xy - local_x * local_y / local_n
+      local_correlation <- ifel(local_n >= 3 & local_x_var > zero_epsilon & local_y_var > zero_epsilon,
+                                local_cov / sqrt(local_x_var * local_y_var), NA)
+      local_coefficient <- ifel(local_n >= 2 & local_x2 > zero_epsilon, local_xy / local_x2, NA)
+      local_residual_ss <- local_y2 - 2 * local_coefficient * local_xy +
+        local_coefficient^2 * local_x2
+      local_r2 <- ifel(local_n >= 2 & local_y2 > zero_epsilon,
+                       1 - local_residual_ss / local_y2, NA)
+      local_correlation <- ifel(local_correlation < -1, -1,
+                                ifel(local_correlation > 1, 1, local_correlation))
+      local_r2 <- ifel(local_r2 < 0, 0, ifel(local_r2 > 1, 1, local_r2))
+      outputs <- list(
+        local_ME = local_me, local_MAE = local_mae, local_MRE = local_mre,
+        local_RMSE = local_rmse, local_correlation = local_correlation,
+        local_coefficient_no_intercept = local_coefficient,
+        local_R2_no_intercept = local_r2,
+        left_aligned = left_valid, right_aligned = right_valid
+      )
+      for (output_name in names(outputs)) {
+        filename <- paste0(prefix, "__", output_name, ".tif")
+        write_result(outputs[[output_name]], filename)
+        artifact_names <- c(artifact_names, filename)
+      }
+      if (!length(first_local_preview)) {
+        first_local_preview <- values(local_mae, mat = FALSE)
+        first_local_preview <- head(first_local_preview[is.finite(first_local_preview)], 1000)
+        first_pair_metrics$local_r2_median <- safe_median(values(local_r2, mat = FALSE))
+        first_pair_metrics$coefficient_median <- safe_median(values(local_coefficient, mat = FALSE))
+        first_pair_metrics$local_corr_median <- safe_median(values(local_correlation, mat = FALSE))
+        first_pair_metrics$lme_median <- safe_median(values(local_me, mat = FALSE))
+        first_pair_metrics$lmae_median <- safe_median(values(local_mae, mat = FALSE))
+        first_pair_metrics$lmre_median <- safe_median(values(local_mre, mat = FALSE))
+        first_pair_metrics$lrmse_median <- safe_median(values(local_rmse, mat = FALSE))
+      }
+    }
+  }
 }
-local_metrics <- list(
-  local_r2_median = safe_median(values(local_r2, mat = FALSE)),
-  coefficient_median = safe_median(values(local_coefficient, mat = FALSE)),
-  local_corr_median = safe_median(values(local_correlation, mat = FALSE)),
-  lme_median = safe_median(values(local_me, mat = FALSE)),
-  lmae_median = safe_median(values(local_mae, mat = FALSE)),
-  lmre_median = safe_median(values(local_mre, mat = FALSE)),
-  lrmse_median = safe_median(values(local_rmse, mat = FALSE))
-)
-if (write_scatter_plot && file.exists(file.path(output_dir, "raster_scatter.png"))) {
-  artifact_names <- c(artifact_names, "raster_scatter.png")
+if (!length(pairwise_metrics)) stop("栅格之间没有重叠的有效像元")
+
+if (write_scatter_plot) {
+  matrix_values <- lapply(aligned, function(raster) values(raster, mat = FALSE))
+  scatter_data <- as.data.frame(matrix_values, check.names = FALSE)
+  names(scatter_data) <- input_names
+  scatter_data <- scatter_data[complete.cases(scatter_data), , drop = FALSE]
+  if (nrow(scatter_data) >= 3) {
+    set.seed(20260917)
+    draw_data <- scatter_data
+    if (nrow(draw_data) > scatter_max_points) {
+      draw_data <- draw_data[sample.int(nrow(draw_data), scatter_max_points), , drop = FALSE]
+    }
+    panel_scatter <- function(x, y, ...) {
+      points(x, y, pch = 16, col = grDevices::adjustcolor("#2C6E9E", alpha.f = 0.18), cex = 0.45)
+      finite <- is.finite(x) & is.finite(y)
+      if (!any(finite)) return()
+      abline(a = 0, b = 1, col = "#777777", lty = 2, lwd = 1)
+      if (sum(finite) >= 2 && sum(x[finite]^2) > 0) {
+        fit <- lm(y[finite] ~ x[finite] - 1)
+        abline(fit, col = "#C43D3D", lwd = 1.2)
+      }
+    }
+    panel_hist <- function(x, ...) {
+      x <- x[is.finite(x)]
+      if (!length(x)) return()
+      histogram <- hist(x, plot = FALSE, breaks = 20)
+      rect(histogram$breaks[-length(histogram$breaks)], 0,
+           histogram$breaks[-1], histogram$counts,
+           col = "#B9D8D1", border = "white")
+    }
+    matrix_png <- file.path(output_dir, "raster_scatter_matrix.png")
+    grDevices::png(matrix_png, width = max(1200, 420 * length(input_names)),
+                   height = max(1200, 420 * length(input_names)), res = 150)
+    pairs(draw_data, lower.panel = panel_scatter, upper.panel = panel_scatter,
+          diag.panel = panel_hist, labels = input_names,
+          main = "Raster pixel scatterplot matrix")
+    grDevices::dev.off()
+    matrix_pdf <- file.path(output_dir, "raster_scatter_matrix.pdf")
+    grDevices::pdf(matrix_pdf, width = max(7, 2.8 * length(input_names)),
+                   height = max(7, 2.8 * length(input_names)))
+    pairs(draw_data, lower.panel = panel_scatter, upper.panel = panel_scatter,
+          diag.panel = panel_hist, labels = input_names,
+          main = "Raster pixel scatterplot matrix")
+    grDevices::dev.off()
+    artifact_names <- c(artifact_names, "raster_scatter_matrix.png", "raster_scatter_matrix.pdf")
+  }
 }
+
 artifacts <- as.list(file.path(output_dir, artifact_names))
 names(artifacts) <- tools::file_path_sans_ext(artifact_names)
 result <- list(
   status = "success",
   engine = "R / terra",
-  message = "栅格异源同质分析完成",
-  metrics = list(
-    me = me, mae = mae, mre = mre, rmse = rmse,
-    correlation = correlation, valid_cells = length(reference_values),
-    local_r2_median = local_metrics$local_r2_median,
-    coefficient_median = local_metrics$coefficient_median,
-    local_corr_median = local_metrics$local_corr_median,
-    lme_median = local_metrics$lme_median,
-    lmae_median = local_metrics$lmae_median,
-    lmre_median = local_metrics$lmre_median,
-    lrmse_median = local_metrics$lrmse_median
-  ),
+  message = paste0("栅格多数据集分析完成：", length(raster_paths), " 个栅格，",
+                   length(pairwise_metrics), " 组两两比较"),
+  raster_names = input_names,
+  pairwise_metrics = pairwise_metrics,
+  metrics = first_pair_metrics,
   output_dir = output_dir,
   artifacts = artifacts,
-  local_values = local_preview
+  local_values = first_local_preview
 )
 jsonlite::write_json(result, result_path, auto_unbox = TRUE, pretty = TRUE, na = "null")
 jsonlite::write_json(result, file.path(output_dir, "result.json"), auto_unbox = TRUE, pretty = TRUE, na = "null")
