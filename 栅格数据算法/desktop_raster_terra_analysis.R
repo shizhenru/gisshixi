@@ -28,6 +28,11 @@ safe_mean <- function(x, ...) {
   if (!length(x)) return(NA_real_)
   mean(x)
 }
+safe_median <- function(x, ...) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(NA_real_)
+  median(x)
+}
 safe_rmse <- function(x, ...) {
   x <- x[is.finite(x)]
   if (!length(x)) return(NA_real_)
@@ -153,6 +158,15 @@ if (write_local_rasters) {
     "local_R2_no_intercept.tif", "reference_aligned.tif", "comparison_aligned.tif"
   )
 }
+local_metrics <- list(
+  local_r2_median = safe_median(values(local_r2, mat = FALSE)),
+  coefficient_median = safe_median(values(local_coefficient, mat = FALSE)),
+  local_corr_median = safe_median(values(local_correlation, mat = FALSE)),
+  lme_median = safe_median(values(local_me, mat = FALSE)),
+  lmae_median = safe_median(values(local_mae, mat = FALSE)),
+  lmre_median = safe_median(values(local_mre, mat = FALSE)),
+  lrmse_median = safe_median(values(local_rmse, mat = FALSE))
+)
 if (write_scatter_plot && file.exists(file.path(output_dir, "raster_scatter.png"))) {
   artifact_names <- c(artifact_names, "raster_scatter.png")
 }
@@ -164,7 +178,14 @@ result <- list(
   message = "栅格异源同质分析完成",
   metrics = list(
     me = me, mae = mae, mre = mre, rmse = rmse,
-    correlation = correlation, valid_cells = length(reference_values)
+    correlation = correlation, valid_cells = length(reference_values),
+    local_r2_median = local_metrics$local_r2_median,
+    coefficient_median = local_metrics$coefficient_median,
+    local_corr_median = local_metrics$local_corr_median,
+    lme_median = local_metrics$lme_median,
+    lmae_median = local_metrics$lmae_median,
+    lmre_median = local_metrics$lmre_median,
+    lrmse_median = local_metrics$lrmse_median
   ),
   output_dir = output_dir,
   artifacts = artifacts,
