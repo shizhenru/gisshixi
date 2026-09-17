@@ -144,9 +144,10 @@ class WorkbenchPage(QWidget):
         self.map_canvas = MapCanvas()
         self.map_canvas.sourceDropped.connect(self.load_shp)
         self.map_canvas.featureClicked.connect(self._on_map_feature_clicked)
+        self.map_canvas.rasterLoaded.connect(self._on_map_raster_loaded)
         body.addWidget(self.map_canvas, 1)
         hint_row = QHBoxLayout()
-        hint = QLabel("滚轮缩放 · 拖拽平移 · 双击复位 · 拖入 SHP 显示几何")
+        hint = QLabel("滚轮缩放 · 拖拽平移 · 双击复位 · 拖入 SHP/栅格显示")
         hint.setObjectName("Muted")
         hint_row.addWidget(hint, 1)
         chart_button = QPushButton("打开图表（散点 / 直方图）")
@@ -479,8 +480,13 @@ class WorkbenchPage(QWidget):
 
     def load_shp(self, path, reset_xy=True):
         from core.io.readers import read_shapefile_geometry
-        if Path(path).suffix.lower() != ".shp":
-            self.statusMessage.emit("仅支持 SHP 几何显示")
+        suffix = Path(path).suffix.lower()
+        if suffix in {".tif", ".tiff", ".img", ".asc"}:
+            self.map_canvas.load_raster(path)
+            self.statusMessage.emit(f"正在加载栅格：{Path(path).name}")
+            return
+        if suffix != ".shp":
+            self.statusMessage.emit("仅支持 SHP 或栅格（TIF/IMG/ASC）显示")
             return
         geometry = read_shapefile_geometry(path)
         if not geometry["geometries"]:
@@ -500,6 +506,12 @@ class WorkbenchPage(QWidget):
             self._refresh_xy_from_map()
         self._refresh_chart_window()
         self.statusMessage.emit(f"已加载 {len(geometry['geometries']):,} 个几何要素到地图")
+
+    def _on_map_raster_loaded(self, error):
+        if error:
+            self.statusMessage.emit(f"栅格打开失败：{error}")
+        else:
+            self.statusMessage.emit("栅格已加载到小地图")
 
     def _on_map_feature_clicked(self, fid):
         self.map_canvas.highlight_feature(fid)

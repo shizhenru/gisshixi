@@ -35,6 +35,8 @@ class ProjectStore:
         self.runtime_dir.mkdir(exist_ok=True)
         self._sources_file = self.runtime_dir / "sources.json"
         self.sources = self._load_sources()
+        # 启动时清理上次异常退出遗留的临时文件，避免体积膨胀。
+        self.cleanup_runtime()
 
     def _load_sources(self) -> list[DataSource]:
         if self._sources_file.exists():
@@ -57,6 +59,10 @@ class ProjectStore:
 
     def add_source(self, path: str) -> DataSource:
         file_path = Path(path)
+        # 已登记过同一路径则直接返回，避免重复登记（例如对齐结果被多次登记）。
+        existing = next((s for s in self.sources if s.path == str(file_path)), None)
+        if existing is not None:
+            return existing
         data_type, icon = _classify(file_path.suffix.lower())
         metadata = read_metadata(str(file_path))
         source = DataSource(
@@ -90,3 +96,51 @@ class ProjectStore:
         target = self.runtime_dir / "last_project.json"
         target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return target
+
+    def cleanup_runtime(self) -> None:
+        """清理运行时临时产物，避免软件体积随使用持续膨胀。
+
+        删除 .runtime 下的一次性临时文件/目录，但保留：
+        - sources.json、last_project.json（持久配置）
+        - raster_preprocess/（栅格对齐结果，供空间分析复用，避免每次重新预处理）
+
+        并移除 path 指向这些临时产物的数据源登记。
+        """
+        import shutil
+
+        runtime = self.runtime_dir
+        if not runtime.exists():
+            return
+        # 1) 移除指向 .runtime 一次性临时产物的数据源登记（保留 raster_preprocess 对齐结果）
+        try:
+            root = runtime.resolve()
+        except OSError:
+            root = runtime.absolute()
+        keep_dir = root / "raster_preprocess"
+        before = len(self.sources)
+        self.sources = [
+            s for s in self.sources
+            if not (_is_under(Path(s.path), root) and not _is_under(Path(s.path), keep_dir))
+        ]
+        if len(self.sources) != before:
+            self._persist()
+        # 2) 删除临时文件，保留持久配置与栅格对齐结果
+        keep = {"sources.json", "last_project.json", "raster_preprocess"}
+        for child in runtime.iterdir():
+            if child.name in keep:
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink()
+            except OSError:
+                continue
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root)
+        return True
+    except (OSError, ValueError):
+        return False

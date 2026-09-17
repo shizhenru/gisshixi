@@ -2,17 +2,23 @@
 from ..qt_compat import (
     QColor,
     QBrush,
+    QImage,
+    QObject,
     QPainter,
     QPen,
     QPolygonF,
     QPointF,
+    QRectF,
     QSizePolicy,
     Qt,
+    QThread,
     QTransform,
     QWidget,
     Signal,
+    Slot,
 )
 from .data_select import MIME_SOURCE_PATH
+from .raster_preview import RasterLoadWorker
 
 
 class MapCanvas(QWidget):
@@ -20,6 +26,7 @@ class MapCanvas(QWidget):
 
     sourceDropped = Signal(str)
     featureClicked = Signal(int)
+    rasterLoaded = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -41,6 +48,10 @@ class MapCanvas(QWidget):
         self._feature_fills = []
         self._highlight_index = None
         self._press_pos = None
+        self._raster_image = QImage()
+        self._raster_loading = False
+        self._raster_error = ""
+        self._raster_seq = 0
 
     def load_shapes(self, geometry_data: dict):
         """加载真实几何数据用于渲染（shapefile 等）。"""
@@ -48,12 +59,61 @@ class MapCanvas(QWidget):
         self.data_bbox = geometry_data.get("bbox")
         self._feature_fills = []
         self._highlight_index = None
+        self._raster_image = QImage()
+        self._raster_loading = False
+        self._raster_error = ""
         self._build_cache()
         self._view_init = False
         self.update()
 
+    def load_raster(self, path):
+        """后台读取单波段栅格并显示为地图底图。"""
+        self.shapes = []
+        self._polygons = []
+        self._polylines = []
+        self._points = []
+        self._polygon_feature_ids = []
+        self._feature_fills = []
+        self._highlight_index = None
+        self._raster_image = QImage()
+        self._raster_loading = True
+        self._raster_error = ""
+        self.data_bbox = None
+        self._view_init = False
+        self.update()
+        self._raster_seq += 1
+        thread = QThread(self)
+        worker = RasterLoadWorker(path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_raster_loaded)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # 持有引用，避免线程/工作对象被 GC 导致 started 信号不触发。
+        self._raster_thread = thread
+        self._raster_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _on_raster_loaded(self, payload):
+        self._raster_loading = False
+        error = payload.get("error", "")
+        if error:
+            self._raster_error = error
+            self._raster_image = QImage()
+            self.data_bbox = None
+        else:
+            self._raster_image = payload.get("image", QImage())
+            self.data_bbox = payload.get("bounds")
+            self._raster_error = ""
+        self._view_init = False
+        self.update()
+        self.rasterLoaded.emit(error)
+
     def clear(self):
-        """清空已加载的几何数据，回到空白占位状态。"""
+        """清空已加载的数据（矢量与栅格），回到空白占位状态。"""
+        self._raster_seq += 1
         self.shapes = []
         self.data_bbox = None
         self._polygons = []
@@ -62,6 +122,9 @@ class MapCanvas(QWidget):
         self._polygon_feature_ids = []
         self._feature_fills = []
         self._highlight_index = None
+        self._raster_image = QImage()
+        self._raster_loading = False
+        self._raster_error = ""
         self._view_init = False
         self.update()
 
@@ -195,18 +258,40 @@ class MapCanvas(QWidget):
         del event
         painter = QPainter(self)
         rect = self.rect().adjusted(1, 1, -1, -1)
-        if self.shapes:
+        if self._raster_loading:
+            self._paint_placeholder(painter, rect, "栅格加载中…")
+        elif self._raster_error:
+            self._paint_placeholder(painter, rect, f"栅格打开失败：{self._raster_error}", error=True)
+        elif not self._raster_image.isNull():
+            self._paint_raster(painter, rect)
+        elif self.shapes:
             self._paint_data(painter, rect)
         else:
-            self._paint_empty(painter, rect)
+            self._paint_placeholder(painter, rect, "未导入空间数据")
 
-    def _paint_empty(self, painter, rect):
+    def _paint_placeholder(self, painter, rect, text, error=False):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(QPen(QColor("#dce9e4"), 1))
         painter.setBrush(QBrush(QColor("#f7faf9")))
         painter.drawRoundedRect(rect, 6, 6)
-        painter.setPen(QPen(QColor("#a8b8b4")))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "未导入空间数据")
+        color = QColor("#d86659") if error else QColor("#a8b8b4")
+        painter.setPen(QPen(color, 1))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _paint_raster(self, painter, rect):
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        if not self.data_bbox:
+            return
+        if not self._view_init:
+            self._fit(rect)
+        cx = rect.center().x()
+        cy = rect.center().y()
+        scale = self._scale
+        transform = QTransform(scale, 0, 0, -scale, cx - self._center_x * scale, cy + self._center_y * scale)
+        xmin, ymin, xmax, ymax = self.data_bbox
+        top_left = transform.map(QPointF(xmin, ymax))
+        bottom_right = transform.map(QPointF(xmax, ymin))
+        painter.drawImage(QRectF(top_left, bottom_right), self._raster_image)
 
     def zoom_in(self):
         self._zoom(1.25)
@@ -219,7 +304,7 @@ class MapCanvas(QWidget):
         self.update()
 
     def _zoom(self, factor):
-        if not self.shapes or not self.data_bbox:
+        if not self.data_bbox:
             return
         rect = self.rect().adjusted(1, 1, -1, -1)
         if not self._view_init:
@@ -228,7 +313,7 @@ class MapCanvas(QWidget):
         self.update()
 
     def wheelEvent(self, event):
-        if not self.shapes or not self.data_bbox:
+        if not self.data_bbox:
             return
         rect = self.rect().adjusted(1, 1, -1, -1)
         if not self._view_init:
@@ -246,7 +331,7 @@ class MapCanvas(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
-        if self.shapes and event.button() == Qt.MouseButton.LeftButton:
+        if self.data_bbox and event.button() == Qt.MouseButton.LeftButton:
             self._panning = True
             self._pan_start = event.position()
             self._press_pos = event.position()
@@ -283,7 +368,7 @@ class MapCanvas(QWidget):
             super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if self.shapes:
+        if self.data_bbox:
             self.reset_view()
         else:
             super().mouseDoubleClickEvent(event)
