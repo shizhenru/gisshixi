@@ -52,6 +52,7 @@ class AnalysisPage(QWidget):
         body.addLayout(selectors)
 
         self.raster_canvas = RasterSwipeCanvas()
+        self.raster_canvas.loadFinished.connect(self._on_compare_loaded)
         reset.clicked.connect(self.raster_canvas.reset_view)
         body.addWidget(self.raster_canvas, 1)
         self.compare_status = QLabel("请选择两幅栅格影像")
@@ -69,10 +70,9 @@ class AnalysisPage(QWidget):
     def _refresh_raster_choices(self):
         if self.reference_combo is None:
             return
-        manifest = RasterPreprocessor(self.store.project_dir).latest_manifest() or {}
-        processed = manifest.get("processed", [])
-        processed_paths = {item.get("source_path") for item in processed}
-        rasters = [source for source in collect_raster_sources(self.store.sources) if source.path in processed_paths]
+        # 列出所有已导入的栅格（含对齐后的结果文件），用户可直接选择对齐结果进行对比；
+        # 若选择的是原始栅格且存在对齐结果，则自动用对齐后路径显示；两幅网格不一致时才提示需要预处理。
+        rasters = collect_raster_sources(self.store.sources)
         current_a = self.reference_combo.currentData()
         current_b = self.comparison_combo.currentData()
         for combo in (self.reference_combo, self.comparison_combo):
@@ -87,7 +87,7 @@ class AnalysisPage(QWidget):
             self.comparison_combo.setCurrentIndex(next((i for i, s in enumerate(rasters) if s.path == current_b), default_b))
         else:
             self.raster_canvas.clear()
-            self.compare_status.setText("请先在「预处理」中选择并运行至少两个栅格的对齐")
+            self.compare_status.setText("请先在「数据管理」导入至少两个栅格数据集")
             return
         self._load_selected()
 
@@ -107,7 +107,10 @@ class AnalysisPage(QWidget):
             self.raster_canvas.clear()
             self.compare_status.setText(error)
             return
-        error = self.raster_canvas.set_images(display_a, display_b, source_a.name, source_b.name)
+        self.compare_status.setText("栅格加载中…")
+        self.raster_canvas.set_images(display_a, display_b, source_a.name, source_b.name)
+
+    def _on_compare_loaded(self, error):
         self.compare_status.setText(error or "已加载，可拖动中央分割线进行左右对比")
 
     def _display_path(self, source_path):

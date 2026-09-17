@@ -4,22 +4,26 @@ from pathlib import Path
 from ...qt_compat import (
     QColor,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QObject,
     QProgressBar,
     QPushButton,
     QTextEdit,
+    QThread,
     QVBoxLayout,
     QWidget,
     Qt,
     Signal,
+    Slot,
 )
 from ...widgets import clear_layout, panel_box
-from core.raster_processing import RasterPreprocessor, collect_raster_sources
+from core.raster_processing import RasterPreprocessor, collect_raster_sources, is_aligned_output
 
 # (分类, 工具名) —— 目前只有「栅格对齐」接入了真实处理，其余为待实现占位。
 TOOLS = [
@@ -36,6 +40,31 @@ TOOLS = [
 ]
 
 
+class _RasterAlignWorker(QObject):
+    """后台线程执行栅格对齐，避免大栅格重投影阻塞 UI。"""
+
+    finished = Signal(object, str)  # (RasterPreprocessResult|None, error)
+    progress = Signal(str)
+
+    def __init__(self, preprocessor, sources, reference, selected_paths):
+        super().__init__()
+        self._preprocessor = preprocessor
+        self._sources = sources
+        self._reference = reference
+        self._selected_paths = selected_paths
+
+    @Slot()
+    def run(self):
+        try:
+            result = self._preprocessor.preprocess(
+                self._sources, self._reference, self._selected_paths,
+                progress_callback=lambda message: self.progress.emit(message),
+            )
+            self.finished.emit(result, "")
+        except Exception as exc:  # noqa: BLE001 - 失败以错误文本回传
+            self.finished.emit(None, str(exc))
+
+
 class PreprocessPage(QWidget):
     """工具箱式预处理界面。"""
 
@@ -50,6 +79,8 @@ class PreprocessPage(QWidget):
         self.progress = None
         self.log = None
         self.raster_list = None
+        self.save_result_button = None
+        self._last_align_result = None
         self._build()
 
     def _build(self):
@@ -156,6 +187,14 @@ class PreprocessPage(QWidget):
         run.setObjectName("PrimaryButton")
         run.clicked.connect(self._run_raster_align)
         self.dynamic_body.addWidget(run)
+        self.run_button = run
+        save = QPushButton("保存结果…")
+        save.setObjectName("OutlineButton")
+        save.setToolTip("将对齐后的栅格结果另存到指定目录（关闭软件后临时文件会被清理）")
+        save.clicked.connect(self._save_align_result)
+        save.setEnabled(False)
+        self.dynamic_body.addWidget(save)
+        self.save_result_button = save
         self._refresh_ref_combo()
 
     def _refresh_ref_combo(self):
@@ -166,7 +205,7 @@ class PreprocessPage(QWidget):
         if not current_selected:
             current_selected = manifest_selected
         self.ref_combo.clear()
-        rasters = collect_raster_sources(self.store.sources)
+        rasters = [s for s in collect_raster_sources(self.store.sources) if not is_aligned_output(s.path)]
         for source in rasters:
             self.ref_combo.addItem(source.name, source.path)
         if rasters:
@@ -238,25 +277,85 @@ class PreprocessPage(QWidget):
             self._log("栅格对齐：失败（选择的栅格不足）")
             return
         reference = self.ref_combo.currentData() or ""
+        self.run_button.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
         self.statusMessage.emit("正在统一栅格坐标系、分辨率和范围…")
-        try:
-            result = self.preprocessor.preprocess(self.store.sources, reference, selected_paths)
-        except Exception as exc:
-            self.progress.setRange(0, 100)
-            self.progress.setVisible(False)
-            self.statusMessage.emit(f"栅格预处理失败：{exc}")
-            self._log(f"栅格对齐：失败（{exc}）")
-            return
+        thread = QThread(self)
+        worker = _RasterAlignWorker(self.preprocessor, self.store.sources, reference, selected_paths)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_align_progress)
+        worker.finished.connect(self._on_align_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # 持有引用，避免线程/工作对象被 GC 导致 started 信号不触发。
+        self._align_thread = thread
+        self._align_worker = worker
+        thread.start()
+
+    @Slot(str)
+    def _on_align_progress(self, message):
+        self.statusMessage.emit(message)
+
+    @Slot(object, str)
+    def _on_align_finished(self, result, error):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.progress.setVisible(False)
+        self.run_button.setEnabled(True)
+        if error:
+            self.statusMessage.emit(f"栅格预处理失败：{error}")
+            self._log(f"栅格对齐：失败（{error}）")
+            return
         if result.status == "success":
             self._log(f"栅格对齐：成功（{len(result.processed or [])} 个数据集）")
+            self._register_align_results(result)
+            self._last_align_result = result
+            if self.save_result_button is not None:
+                self.save_result_button.setEnabled(True)
         else:
             self._log(f"栅格对齐：{result.message}")
         self.statusMessage.emit(result.message)
+
+    def _register_align_results(self, result):
+        """把对齐结果登记到数据管理（store.sources），供数据目录与后续分析使用。"""
+        registered = []
+        for item in result.processed or []:
+            aligned = item.get("aligned_path", "")
+            if not aligned or not Path(aligned).exists():
+                continue
+            source = self.store.add_source(aligned)
+            if source and source.path == aligned:
+                registered.append(Path(aligned).name)
+        if registered:
+            self._log(f"已登记 {len(registered)} 个结果到数据管理：{'、'.join(registered)}")
+
+    def _save_align_result(self):
+        """把对齐结果另存到用户指定目录（持久保留，不随关闭清理）。"""
+        result = self._last_align_result
+        if not result or not (result.processed or []):
+            self.statusMessage.emit("没有可保存的对齐结果，请先运行栅格对齐")
+            return
+        target = QFileDialog.getExistingDirectory(self, "选择保存目录", "")
+        if not target:
+            return
+        target = Path(target)
+        saved = []
+        try:
+            for item in result.processed:
+                src = Path(item.get("aligned_path", ""))
+                if not src.exists():
+                    continue
+                import shutil
+                shutil.copy2(src, target / src.name)
+                saved.append(src.name)
+        except OSError as exc:
+            self.statusMessage.emit(f"保存失败：{exc}")
+            return
+        self._log(f"已保存 {len(saved)} 个结果到：{target}")
+        self.statusMessage.emit(f"已保存 {len(saved)} 个对齐结果到：{target}")
 
     def _filter_tools(self, text):
         if not self.tool_list:

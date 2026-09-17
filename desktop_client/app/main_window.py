@@ -86,6 +86,8 @@ class SpatialValidationWindow(QMainWindow):
         if self._analysis_thread is not None and self._analysis_thread.isRunning():
             self._analysis_thread.quit()
             self._analysis_thread.wait(2000)
+        # 清理运行时临时产物（栅格对齐/分析输出等），避免软件体积持续膨胀。
+        self.store.cleanup_runtime()
         event.accept()
 
     def _build(self):
@@ -184,6 +186,8 @@ class SpatialValidationWindow(QMainWindow):
         if key == "workspace":
             self.workbench_page._refresh_variable_options()
             self.workbench_page.update_after_data_change()
+        elif key == "data":
+            self.data_page.refresh()
         elif key == "preprocess":
             self.preprocess_page.update_after_data_change()
         elif key == "analysis":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -8,6 +9,13 @@ from typing import Any
 
 
 RASTER_SUFFIXES = {".tif", ".tiff", ".img", ".asc"}
+
+# 对齐后的栅格统一使用同一种数据类型与 nodata，保证拉帘对比等显示效果一致。
+UNIFIED_DTYPE = "float32"
+UNIFIED_NODATA = -9999.0
+
+# 重投影并行线程数（须为整数；"all_cpus" 字符串会在 GDAL 内部与 1 做比较时报错）。
+WARP_NUM_THREADS = min(8, max(2, os.cpu_count() or 4))
 
 
 @dataclass
@@ -34,6 +42,11 @@ def is_raster_source(source) -> bool:
     return Path(source.path).suffix.lower() in RASTER_SUFFIXES or "栅格" in source.data_type
 
 
+def is_aligned_output(path) -> bool:
+    """判断路径是否为栅格对齐的输出产物（对齐结果统一以 aligned_ 前缀命名）。"""
+    return Path(path).name.startswith("aligned_")
+
+
 def collect_raster_sources(sources) -> list:
     return [source for source in sources if is_raster_source(source)]
 
@@ -46,7 +59,7 @@ class RasterPreprocessor:
         self.output_dir = project_dir / ".runtime" / "raster_preprocess"
         self.manifest_path = self.output_dir / "manifest.json"
 
-    def preprocess(self, sources, reference_path: str = "", selected_paths=None) -> RasterPreprocessResult:
+    def preprocess(self, sources, reference_path: str = "", selected_paths=None, progress_callback=None) -> RasterPreprocessResult:
         rasters = collect_raster_sources(sources)
         if selected_paths is not None:
             selected_set = {str(path) for path in selected_paths}
@@ -97,7 +110,9 @@ class RasterPreprocessor:
             target_bounds = ref.bounds
             target_res = ref.res
 
-        for source in rasters:
+        for i, source in enumerate(rasters):
+            if progress_callback:
+                progress_callback(f"正在对齐 {source.name}（{i + 1}/{len(rasters)}）…")
             in_path = Path(source.path)
             out_path = self.output_dir / f"aligned_{in_path.stem}.tif"
             with rasterio.open(in_path) as src:
@@ -108,12 +123,13 @@ class RasterPreprocessor:
                 src_crs = src.crs
                 src_res = src.res
                 src_bounds = src.bounds
-                src_profile = src.profile
-                nodata = src.nodata
+                src_nodata = src.nodata
+                # 统一输出 dtype 与 nodata：源 nodata 仅用于读取时识别无效像元，
+                # 输出统一为 UNIFIED_DTYPE / UNIFIED_NODATA，保证显示效果一致。
                 profile = target_profile.copy()
                 profile.update(
-                    dtype=src_profile.get("dtype", target_profile.get("dtype", "float32")),
-                    nodata=nodata,
+                    dtype=UNIFIED_DTYPE,
+                    nodata=UNIFIED_NODATA,
                 )
                 with rasterio.open(out_path, "w", **profile) as dst:
                     reproject(
@@ -121,12 +137,15 @@ class RasterPreprocessor:
                         destination=rasterio.band(dst, 1),
                         src_transform=src.transform,
                         src_crs=src_crs,
-                        src_nodata=nodata,
+                        src_nodata=src_nodata,
                         dst_transform=target_transform,
                         dst_crs=target_crs,
-                        dst_nodata=nodata,
+                        dst_nodata=UNIFIED_NODATA,
                         resampling=Resampling.bilinear,
+                        num_threads=WARP_NUM_THREADS,
                     )
+                with rasterio.open(out_path, "r+") as dst:
+                    dst.build_overviews([2, 4, 8, 16, 32, 64], Resampling.average)
 
             if source.path == reference.path:
                 checks.append(f"{source.name}: 作为参考网格")
@@ -148,6 +167,8 @@ class RasterPreprocessor:
                     "height": target_height,
                     "resolution": [target_res[0], target_res[1]],
                     "bounds": [target_bounds.left, target_bounds.bottom, target_bounds.right, target_bounds.top],
+                    "dtype": UNIFIED_DTYPE,
+                    "nodata": UNIFIED_NODATA,
                 }
             )
 
