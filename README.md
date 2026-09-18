@@ -11,7 +11,8 @@
 - 空间预处理：以参考栅格为目标网格，统一 CRS、分辨率、范围和单波段 GeoTIFF 输出。
 - 属性/矢量分析：通过 Python 或 R 算法适配器执行任务，保留统一的 JSON 输入/输出接口；「R 属性 GWR」后端为真实 GWR 实现。
 - 栅格分析：调用 R `terra` 脚本，计算 ME、MAE、MRE、RMSE、Pearson 相关系数和局部窗口指标。
-- 可视化：桌面端显示矢量几何、分析参数、指标卡、局部结果和任务状态；空间分析页支持两幅已对齐单波段栅格的拉帘式左右对比。
+- 可视化：栅格散点图矩阵由 Python `matplotlib` 绘制；左下显示散点和回归线，右上显示两两指标，对角线显示直方图和密度曲线。
+- 结果查看：结果与报告页提供全局/局部摘要、散点图矩阵、两两指标数据表格和可复现报告。
 - 导出：导出数据目录 CSV、分析报告 Markdown 以及栅格分析生成的 GeoTIFF/CSV/PNG 文件。
 
 ## 功能栏目
@@ -24,7 +25,7 @@
 | 数据管理 | 设定项目统一参数（坐标系 / 分辨率 / 研究区范围 / 数据格式），登记多源数据并做一致性检查（与统一参数不符的项标红） |
 | 预处理 | 工具箱式界面：工具目录 + 参数面板 + 运行历史，已接入栅格对齐（统一 CRS / 分辨率 / 范围） |
 | 空间分析 | 选择两幅栅格影像进行拉帘式左右对比（共享地图视图、可拖动分割线），并提供带宽区间探索（100–1000，步长 100） |
-| 结果与报告 | 全局 / 局部模型摘要、图表与可复现的分析报告 |
+| 结果与报告 | 全局 / 局部模型摘要、散点图矩阵、两两指标数据表格与可复现的分析报告 |
 
 ## 项目结构
 
@@ -56,6 +57,7 @@ desktop_client/                              # Qt 桌面客户端（项目运行
    ├─ project.py                             # 项目数据源和运行时配置持久化
    ├─ engine.py                              # 按后端分派分析任务
    ├─ raster_processing.py                   # rasterio 栅格对齐预处理
+  ├─ raster_plotting.py                      # matplotlib 栅格散点图矩阵
    ├─ algorithms/                            # 算法子系统
    │  ├─ base.py                             #   AlgorithmRunner 抽象基类
    │  ├─ python_runner.py                    #   Python 子进程适配器
@@ -76,6 +78,9 @@ desktop_client/                              # Qt 桌面客户端（项目运行
 栅格数据算法/                                 # 独立 R 脚本（栅格分析）
 ├─ desktop_raster_terra_analysis.R           # 桌面端调用的 R/terra 栅格脚本
 ├─ nightlight_terra_analysis.R               # 夜光数据独立分析脚本
+├─ generate_debug_raster_data.py              # 生成可重复的模拟栅格调试数据
+├─ plot_debug_scatter_matrix.py               # 独立调试散点图矩阵样式
+├─ debug_simulation/                          # 模拟像元、指标和图像产物
 └─ gwmv.r                                    # 栅格相关局部指标函数
 ```
 
@@ -147,6 +152,7 @@ $env:SPATIAL_VALIDATION_PYTHON = "D:\path\to\gdal\python.exe"
 - PyQt6
 - rasterio
 - numpy（栅格拉帘显示和像元拉伸）
+- matplotlib（栅格散点图矩阵）
 
 可选依赖：
 
@@ -155,7 +161,7 @@ $env:SPATIAL_VALIDATION_PYTHON = "D:\path\to\gdal\python.exe"
 - R 包 `jsonlite`：所有 R 算法适配器读取配置、写出 JSON 结果所需。
 - R 包 `sf`、`GWmodel`、`sp`：运行属性数据 GWR（`scripts/attribute/gwr_attribute.R`）。
 - R 包 `terra`：运行 `栅格数据算法/desktop_raster_terra_analysis.R`。
-- R 包 `ggplot2`：栅格/属性分析输出散点图；未安装时不影响核心统计和局部栅格输出。
+- R 包 `ggplot2`：仅独立 R 脚本需要时安装；桌面端栅格散点图矩阵由 Python `matplotlib` 绘制。
 
 如果使用 R 后端，请在桌面端「系统设置」中配置 `Rscript.exe` 路径。程序会把该路径传给普通 R 分析和栅格 `R / terra` 分析。具体配置方法见下一节「配置 R 环境（Rscript）」。
 
@@ -219,7 +225,7 @@ R 包清单见 `desktop_client/requirements.R`（`requirements.txt` 中也有备
 | `jsonlite` | 所有 R 算法适配器读取配置、写出 JSON 结果（必需） |
 | `sf`、`GWmodel`、`sp` | 属性数据 GWR（「R 属性 GWR」后端） |
 | `terra` | 栅格分析（「栅格 R / terra」后端） |
-| `ggplot2` | 输出散点图（可选，不影响核心统计） |
+| `ggplot2` | 独立 R 脚本输出散点图（可选） |
 
 ## 客户端使用流程
 
@@ -275,13 +281,38 @@ Rscript desktop_raster_terra_analysis.R config.json output.json
 
 结果写入 `desktop_client/.runtime/raster_analysis/`，包括：
 
-- `global_metrics.csv`
+- `result.json`：全局摘要、局部摘要、两两比较指标和产物路径
+- `raster_scatter_data.csv`：用于绘制散点图矩阵的抽样像元数据
+- `raster_scatter_matrix.png`：Python `matplotlib` 生成的散点图矩阵
 - `local_ME.tif`、`local_MAE.tif`、`local_MRE.tif`、`local_RMSE.tif`
 - `local_correlation.tif`、`local_coefficient_no_intercept.tif`、`local_R2_no_intercept.tif`
 - `reference_aligned.tif`、`comparison_aligned.tif`
-- 安装 `ggplot2` 后生成的 `raster_scatter.png`
 
 统一分析结果还会写入 `desktop_client/.runtime/analysis_result.json`。
+
+结果与报告页的“数据表格”标签会优先读取结果目录中的
+`pairwise_global_metrics.csv` 或 `pairwise_metrics.csv`；如果没有 CSV，
+则直接使用 `result.json` 中的 `pairwise_metrics` 生成同样的两两指标表格。
+
+### 散点图矩阵调试
+
+`栅格数据算法/` 下提供了一套独立的可视化调试数据和脚本，不依赖真实栅格即可调整样式：
+
+```powershell
+python .\栅格数据算法\generate_debug_raster_data.py
+.\.venv\Scripts\python.exe .\栅格数据算法\plot_debug_scatter_matrix.py
+```
+
+产物位于 `栅格数据算法/debug_simulation/`：
+
+- `scatter_data.csv`：模拟像元数据
+- `pairwise_global_metrics.csv`：两两全局指标表
+- `pairwise_metrics.csv`：JSON 结果结构对应的指标表
+- `local_metrics.csv`：首对栅格的局部指标
+- `result.json`：模拟客户端分析结果
+- `scatter_matrix.png` / `scatter_matrix.pdf`：调试图像
+
+矩阵样式为：左下三角显示散点和线性回归线，右上三角显示 Pearson's `r`、RMSE、MAE、ME 和有效样本数，对角线显示橙色直方图与密度曲线。调试完成后，客户端实际绘图实现位于 `desktop_client/core/raster_plotting.py`。
 
 ## 算法接口与添加指南
 
