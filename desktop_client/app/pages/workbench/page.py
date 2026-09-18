@@ -16,6 +16,7 @@ from ...qt_compat import (
     QPushButton,
     QSpinBox,
     QDoubleSpinBox,
+    QScrollArea,
     QTabWidget,
     QToolTip,
     QVBoxLayout,
@@ -54,6 +55,13 @@ class InfoIcon(QLabel):
     def leaveEvent(self, event):
         QToolTip.hideText()
         super().leaveEvent(event)
+
+
+class NoWheelComboBox(QComboBox):
+    """工作台下拉框不因鼠标滚轮经过而切换选项。"""
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class WorkbenchPage(QWidget):
@@ -110,7 +118,7 @@ class WorkbenchPage(QWidget):
         right.addWidget(self._symbology_panel())
         right_widget = QWidget()
         right_widget.setLayout(right)
-        right_widget.setFixedWidth(300)
+        right_widget.setFixedWidth(360)
         top.addWidget(right_widget)
 
         layout.addLayout(top, 1)
@@ -208,6 +216,13 @@ class WorkbenchPage(QWidget):
 
     def _parameter_panel(self):
         panel, body = panel_box("GWR MODEL", "模型参数", scrollable=True)
+        for scroll in panel.findChildren(QScrollArea):
+            scroll.setStyleSheet(
+                "QScrollBar:vertical { width: 7px; margin: 2px 1px 2px 1px; }"
+                "QScrollBar::handle:vertical { min-height: 28px; background: #b8c9c5; border-radius: 3px; }"
+                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+                "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+            )
         body.setSpacing(10)
 
         self.y_combo = self._add_select(body, "因变量 Y")
@@ -241,8 +256,8 @@ class WorkbenchPage(QWidget):
         raster_layout.setSpacing(8)
         raster_layout.addWidget(QLabel("分析栅格（至少选择两个）"), 0, Qt.AlignmentFlag.AlignLeft)
         self.raster_list = QListWidget()
-        self.raster_list.setMinimumHeight(90)
-        self.raster_list.setMaximumHeight(160)
+        self.raster_list.setMinimumHeight(130)
+        self.raster_list.setMaximumHeight(220)
         raster_layout.addWidget(self.raster_list)
         raster_layout.addWidget(QLabel("局部窗口大小"), 0, Qt.AlignmentFlag.AlignLeft)
         self.raster_window_spin = QSpinBox()
@@ -251,7 +266,7 @@ class WorkbenchPage(QWidget):
         self.raster_window_spin.setValue(5)
         raster_layout.addWidget(self.raster_window_spin)
         raster_layout.addWidget(QLabel("重采样方法"), 0, Qt.AlignmentFlag.AlignLeft)
-        self.raster_resampling_combo = QComboBox()
+        self.raster_resampling_combo = NoWheelComboBox()
         self.raster_resampling_combo.addItems(["bilinear", "near", "cubic"])
         self.raster_resampling_combo.setFixedHeight(32)
         self._style_combo(self.raster_resampling_combo)
@@ -284,6 +299,7 @@ class WorkbenchPage(QWidget):
         run_button = QPushButton("▶ 运行")
         run_button.setObjectName("PrimaryButton")
         run_button.clicked.connect(self.run)
+        self.run_button = run_button
         footer = QWidget()
         footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(18, 4, 18, 14)
@@ -295,7 +311,7 @@ class WorkbenchPage(QWidget):
         label = QLabel(label_text)
         label.setObjectName("Muted")
         body.addWidget(label)
-        combo = QComboBox()
+        combo = NoWheelComboBox()
         combo.setFixedHeight(32)
         if items:
             combo.addItems(items)
@@ -476,7 +492,17 @@ class WorkbenchPage(QWidget):
         return parameters
 
     def run(self):
+        if not self.run_button.isEnabled():
+            return
+        self.set_run_busy(True)
         self.runRequested.emit(self.collect_parameters())
+
+    def set_run_busy(self, busy):
+        self.run_button.setEnabled(not busy)
+        self.run_button.setText("⏳ 运行中…" if busy else "▶ 运行")
+        self.run_button.setStyleSheet(
+            "QPushButton { background: #9aa9a6; color: #ffffff; border: 0; }" if busy else ""
+        )
 
     def load_shp(self, path, reset_xy=True):
         from core.io.readers import read_shapefile_geometry
@@ -732,6 +758,7 @@ class WorkbenchPage(QWidget):
             self.statusMessage.emit(f"保存失败：{exc}")
 
     def update_result(self, result: AnalysisResult, shp_path=None):
+        self.set_run_busy(False)
         self.latest_result = result
         self._result_output_shp = getattr(result, "output_shp", "") or ""
         if shp_path and result.status == "success" and result.local_columns:

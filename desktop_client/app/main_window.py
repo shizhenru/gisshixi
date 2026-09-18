@@ -216,6 +216,7 @@ class SpatialValidationWindow(QMainWindow):
         if parameters.get("analysis_type") == "raster":
             raster_paths = [path for path in parameters.get("raster_paths", []) if path]
             if len(raster_paths) < 2:
+                self.workbench_page.set_run_busy(False)
                 self.set_status("栅格分析至少需要选择两个栅格数据集")
                 return
             parameters = dict(parameters)
@@ -235,6 +236,7 @@ class SpatialValidationWindow(QMainWindow):
                 None,
             )
             if not shp_path:
+                self.workbench_page.set_run_busy(False)
                 self.set_status("属性 GWR 分析需要先导入一个矢量数据（SHP/GeoPackage/GeoJSON）")
                 return
             parameters = dict(parameters)
