@@ -14,6 +14,7 @@ scatter_max_points <- as.integer(config$scatter_max_points %||% 50000L)
 zero_epsilon <- as.numeric(config$zero_epsilon %||% 1e-12)
 write_local_rasters <- isTRUE(config$write_local_rasters %||% TRUE)
 write_scatter_plot <- isTRUE(config$write_scatter_plot %||% TRUE)
+python_scatter_plot <- isTRUE(config$python_scatter_plot %||% FALSE)
 resampling <- config$resampling %||% "bilinear"
 
 raster_paths <- config$raster_paths %||% character()
@@ -196,7 +197,9 @@ if (write_scatter_plot) {
     if (nrow(draw_data) > scatter_max_points) {
       draw_data <- draw_data[sample.int(nrow(draw_data), scatter_max_points), , drop = FALSE]
     }
-    panel_scatter <- function(x, y, ...) {
+    write.csv(draw_data, file.path(output_dir, "raster_scatter_data.csv"), row.names = FALSE)
+    if (!python_scatter_plot) {
+      panel_scatter <- function(x, y, ...) {
       points(x, y, pch = 16, col = grDevices::adjustcolor("#2C6E9E", alpha.f = 0.18), cex = 0.45)
       finite <- is.finite(x) & is.finite(y)
       if (!any(finite)) return()
@@ -205,30 +208,31 @@ if (write_scatter_plot) {
         fit <- lm(y[finite] ~ x[finite] - 1)
         abline(fit, col = "#C43D3D", lwd = 1.2)
       }
-    }
-    panel_hist <- function(x, ...) {
+      }
+      panel_hist <- function(x, ...) {
       x <- x[is.finite(x)]
       if (!length(x)) return()
       histogram <- hist(x, plot = FALSE, breaks = 20)
       rect(histogram$breaks[-length(histogram$breaks)], 0,
            histogram$breaks[-1], histogram$counts,
            col = "#B9D8D1", border = "white")
-    }
-    matrix_png <- file.path(output_dir, "raster_scatter_matrix.png")
-    grDevices::png(matrix_png, width = max(1200, 420 * length(input_names)),
-                   height = max(1200, 420 * length(input_names)), res = 150)
-    pairs(draw_data, lower.panel = panel_scatter, upper.panel = panel_scatter,
-          diag.panel = panel_hist, labels = input_names,
-          main = "Raster pixel scatterplot matrix")
-    grDevices::dev.off()
-    matrix_pdf <- file.path(output_dir, "raster_scatter_matrix.pdf")
-    grDevices::pdf(matrix_pdf, width = max(7, 2.8 * length(input_names)),
-                   height = max(7, 2.8 * length(input_names)))
-    pairs(draw_data, lower.panel = panel_scatter, upper.panel = panel_scatter,
-          diag.panel = panel_hist, labels = input_names,
-          main = "Raster pixel scatterplot matrix")
-    grDevices::dev.off()
-    artifact_names <- c(artifact_names, "raster_scatter_matrix.png", "raster_scatter_matrix.pdf")
+      }
+      matrix_png <- file.path(output_dir, "raster_scatter_matrix.png")
+      grDevices::png(matrix_png, width = max(1200, 420 * length(input_names)),
+             height = max(1200, 420 * length(input_names)), res = 150)
+      pairs(draw_data, lower.panel = panel_scatter, upper.panel = panel_scatter,
+        diag.panel = panel_hist, labels = input_names,
+        main = "Raster pixel scatterplot matrix")
+      grDevices::dev.off()
+      matrix_pdf <- file.path(output_dir, "raster_scatter_matrix.pdf")
+      grDevices::pdf(matrix_pdf, width = max(7, 2.8 * length(input_names)),
+             height = max(7, 2.8 * length(input_names)))
+      pairs(draw_data, lower.panel = panel_scatter, upper.panel = panel_scatter,
+        diag.panel = panel_hist, labels = input_names,
+        main = "Raster pixel scatterplot matrix")
+      grDevices::dev.off()
+      artifact_names <- c(artifact_names, "raster_scatter_matrix.png", "raster_scatter_matrix.pdf")
+        }
   }
 }
 

@@ -66,6 +66,7 @@ class RasterTerraRunner(AlgorithmRunner):
             "comparison_path": str(safe_inputs[1]),
             "raster_paths": [str(path) for path in safe_inputs],
             "output_dir": str(temp_dir),
+            "python_scatter_plot": True,
         })
         config_path = temp_dir / "raster_task.json"
         config_path.write_text(json.dumps(task_config, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -86,6 +87,14 @@ class RasterTerraRunner(AlgorithmRunner):
             if not result_file.exists():
                 raise RuntimeError("栅格 R 算法未生成 result.json")
             result = json.loads(result_file.read_text(encoding="utf-8"))
+            scatter_data = temp_dir / "raster_scatter_data.csv"
+            if scatter_data.exists():
+                from ..raster_plotting import plot_scatter_matrix
+
+                names = [str(name) for name in result.get("raster_names", [])]
+                scatter_png = temp_dir / "raster_scatter_matrix.png"
+                if plot_scatter_matrix(scatter_data, scatter_png, names):
+                    result.setdefault("artifacts", {})["raster_scatter_matrix"] = str(scatter_png)
             artifacts = {}
             for artifact in temp_dir.iterdir():
                 target = result_dir / artifact.name

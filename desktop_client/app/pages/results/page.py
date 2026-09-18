@@ -1,4 +1,5 @@
 """结果与报告页：全局/局部摘要 + 图表 + 分析报告。"""
+import csv
 from pathlib import Path
 
 from ...qt_compat import (
@@ -7,6 +8,7 @@ from ...qt_compat import (
     QHBoxLayout,
     QLabel,
     QDialog,
+    QAbstractItemView,
     QPainter,
     QPixmap,
     QPushButton,
@@ -16,6 +18,8 @@ from ...qt_compat import (
     QTextEdit,
     QVBoxLayout,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QWidget,
     Qt,
     Signal,
@@ -159,6 +163,7 @@ class ResultsPage(QWidget):
         self.artifacts_text = None
         self.chart_tabs = None
         self.scatter_label = None
+        self.pairwise_table = None
         self._scatter_preview = None
         self._scatter_path = ""
         self.local_specs = []
@@ -242,6 +247,13 @@ class ResultsPage(QWidget):
             placeholder = QLabel("该图表暂未生成")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.chart_tabs.addTab(placeholder, name)
+        self.pairwise_table = QTableWidget(0, 0)
+        self.pairwise_table.setAlternatingRowColors(True)
+        self.pairwise_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.pairwise_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.pairwise_table.setSortingEnabled(True)
+        self.pairwise_table.setMinimumHeight(420)
+        self.chart_tabs.addTab(self.pairwise_table, "数据表格")
         layout.addWidget(self.chart_tabs)
         return panel
 
@@ -284,6 +296,7 @@ class ResultsPage(QWidget):
         for key, (label, prefix) in self.local_labels.items():
             value = result.metrics.get(key, "—")
             label.setText(str(value))
+        self._refresh_pairwise_table(result)
         self._scatter_path = result.artifacts.get(
             "raster_scatter_matrix",
             result.artifacts.get("scatter", result.artifacts.get("raster_scatter", "")),
@@ -308,6 +321,55 @@ class ResultsPage(QWidget):
             f"执行引擎：{result.engine}\n任务状态：{result.status}\n运行信息：{result.message}\n"
             f"输出目录：{result.output_dir or '—'}{pairwise_note}"
         )
+
+    def _refresh_pairwise_table(self, result: AnalysisResult):
+        if self.pairwise_table is None:
+            return
+        headers, rows = self._load_pairwise_rows(result)
+        self.pairwise_table.setSortingEnabled(False)
+        self.pairwise_table.clear()
+        self.pairwise_table.setColumnCount(len(headers))
+        self.pairwise_table.setHorizontalHeaderLabels(headers)
+        self.pairwise_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            for column_index, header in enumerate(headers):
+                value = row.get(header, "")
+                text = f"{value:.6g}" if isinstance(value, float) else str(value) if value is not None else ""
+                self.pairwise_table.setItem(row_index, column_index, QTableWidgetItem(text))
+        self.pairwise_table.resizeColumnsToContents()
+        self.pairwise_table.setSortingEnabled(True)
+
+    @staticmethod
+    def _load_pairwise_rows(result: AnalysisResult):
+        csv_path = ""
+        for key, path in result.artifacts.items():
+            if key in {"pairwise_global_metrics", "pairwise_metrics"} or Path(path).name in {
+                "pairwise_global_metrics.csv",
+                "pairwise_metrics.csv",
+            }:
+                csv_path = path
+                break
+        if csv_path and Path(csv_path).exists():
+            try:
+                with Path(csv_path).open("r", encoding="utf-8-sig", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    return reader.fieldnames or [], list(reader)
+            except (OSError, UnicodeError):
+                pass
+
+        rows = []
+        for pair_name, values in result.pairwise_metrics.items():
+            row = {"pair": pair_name}
+            row.update(values)
+            rows.append(row)
+        if not rows:
+            return [], []
+        headers = list(rows[0])
+        for row in rows[1:]:
+            for header in row:
+                if header not in headers:
+                    headers.append(header)
+        return headers, rows
 
     def _refresh_scatter_image(self):
         if not self.scatter_label:

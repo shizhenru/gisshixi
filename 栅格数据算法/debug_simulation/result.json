@@ -1,0 +1,102 @@
+{
+  "status": "success",
+  "engine": "Python debug simulation",
+  "message": "可重复的栅格散点图矩阵调试数据",
+  "raster_names": [
+    "reference",
+    "comparison_a",
+    "comparison_b",
+    "comparison_c"
+  ],
+  "shape": [
+    60,
+    80
+  ],
+  "window_size": 5,
+  "pairwise_metrics": {
+    "reference__vs__comparison_a": {
+      "left": "reference",
+      "right": "comparison_a",
+      "me": -6.097195383397577,
+      "mae": 6.85144593057075,
+      "mre": 0.09391360875601937,
+      "rmse": 8.207794300011457,
+      "correlation": 0.9714441502726647,
+      "valid_cells": 4731
+    },
+    "reference__vs__comparison_b": {
+      "left": "reference",
+      "right": "comparison_b",
+      "me": 8.294735994403993,
+      "mae": 9.243987114336633,
+      "mre": 0.12408558164019409,
+      "rmse": 11.14788712686214,
+      "correlation": 0.9384244151937204,
+      "valid_cells": 4731
+    },
+    "reference__vs__comparison_c": {
+      "left": "reference",
+      "right": "comparison_c",
+      "me": -9.446220607570698,
+      "mae": 10.423674844343914,
+      "mre": 0.14156543722335033,
+      "rmse": 13.025537879023084,
+      "correlation": 0.9430572766469232,
+      "valid_cells": 4731
+    },
+    "comparison_a__vs__comparison_b": {
+      "left": "comparison_a",
+      "right": "comparison_b",
+      "me": 14.391931377801573,
+      "mae": 14.76875053590583,
+      "mre": 0.17949892319044883,
+      "rmse": 16.939700258277423,
+      "correlation": 0.9209371169056696,
+      "valid_cells": 4731
+    },
+    "comparison_a__vs__comparison_c": {
+      "left": "comparison_a",
+      "right": "comparison_c",
+      "me": -3.3490252241731193,
+      "mae": 8.349709921092947,
+      "mre": 0.10743309613943107,
+      "rmse": 10.422211623959937,
+      "correlation": 0.9236618685230281,
+      "valid_cells": 4731
+    },
+    "comparison_b__vs__comparison_c": {
+      "left": "comparison_b",
+      "right": "comparison_c",
+      "me": -17.74095660197469,
+      "mae": 18.181105446397606,
+      "mre": 0.29077402686242637,
+      "rmse": 21.276831179231852,
+      "correlation": 0.8929116164470811,
+      "valid_cells": 4731
+    }
+  },
+  "metrics": {
+    "left": "reference",
+    "right": "comparison_a",
+    "me": -6.097195383397577,
+    "mae": 6.85144593057075,
+    "mre": 0.09391360875601937,
+    "rmse": 8.207794300011457,
+    "correlation": 0.9714441502726647,
+    "valid_cells": 4731,
+    "local_ME_median": -6.156156040309126,
+    "local_MAE_median": 6.831132049499182,
+    "local_MRE_median": 0.08872801378071551,
+    "local_RMSE_median": 8.13158593720362,
+    "local_correlation_median": 0.20747049424416092,
+    "local_coefficient_no_intercept_median": 0.9240053903802522,
+    "local_R2_no_intercept_median": 0.9959597254284331
+  },
+  "artifacts": {
+    "scatter_data": "scatter_data.csv",
+    "pairwise_metrics": "pairwise_metrics.csv",
+    "local_metrics": "local_metrics.csv",
+    "scatter_matrix": "scatter_matrix.png",
+    "scatter_matrix_pdf": "scatter_matrix.pdf"
+  }
+}

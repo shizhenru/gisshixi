@@ -3,6 +3,8 @@ from ..qt_compat import (
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -36,6 +38,7 @@ class ChartWindow(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._scatter_tab(), "散点图")
         self.tabs.addTab(self._histogram_tab(), "直方图")
+        self.tabs.addTab(self._table_tab(), "数据表")
         root.addWidget(self.tabs, 1)
 
     def _scatter_tab(self):
@@ -74,6 +77,19 @@ class ChartWindow(QWidget):
         self.hist_combo.currentTextChanged.connect(self._render_histogram)
         return w
 
+    def _table_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        self.data_table = QTableWidget(0, 0)
+        self.data_table.setSortingEnabled(True)
+        self.data_table.setAlternatingRowColors(True)
+        self.data_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.data_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.data_table.setWordWrap(False)
+        lay.addWidget(self.data_table, 1)
+        return w
+
     def update_data(self, fields, values):
         """更新字段与数据（拖入新 SHP 或重新加载时调用）。"""
         self._fields = list(fields)
@@ -93,6 +109,7 @@ class ChartWindow(QWidget):
             self.hist_combo.setCurrentText(current_h if current_h in numeric else numeric[0])
         self._render_scatter()
         self._render_histogram()
+        self._render_table()
 
     def _is_numeric(self, field):
         vals = [v for v in self._values.get(field, []) if v is not None]
@@ -127,6 +144,23 @@ class ChartWindow(QWidget):
             self.histogram_canvas.clear()
             return
         self.histogram_canvas.set_data(self._values[field], field)
+
+    def _render_table(self):
+        self.data_table.setSortingEnabled(False)
+        self.data_table.clear()
+        self.data_table.setRowCount(0)
+        self.data_table.setColumnCount(len(self._fields))
+        self.data_table.setHorizontalHeaderLabels(self._fields)
+        row_count = max((len(values) for values in self._values.values()), default=0)
+        self.data_table.setRowCount(row_count)
+        for row_index in range(row_count):
+            for column_index, field in enumerate(self._fields):
+                values = self._values.get(field, [])
+                value = values[row_index] if row_index < len(values) else None
+                text = "" if value is None else str(value)
+                self.data_table.setItem(row_index, column_index, QTableWidgetItem(text))
+        self.data_table.resizeColumnsToContents()
+        self.data_table.setSortingEnabled(True)
 
     def highlight_feature(self, fid):
         """反向：地图点击要素后，高亮散点图中对应点。"""
