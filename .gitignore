@@ -5,6 +5,8 @@ __pycache__/
 
 # 运行时数据
 .runtime/
+desktop_client/.venv/
+几何数据算法/results/
 
 # IDE
 .vscode/

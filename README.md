@@ -339,7 +339,7 @@ python .\栅格数据算法\generate_debug_raster_data.py
 | --------- | --------- | --------- | -------------- |
 | 属性数据 | `scripts/attribute/` | `gwr_placeholder.py` / `.R`（占位）、`gwr_attribute.R`（真实 GWR） | `python_runner` / `r_runner` |
 | 栅格数据 | `scripts/raster/`（脚本暂在 `../栅格数据算法/`） | `desktop_raster_terra_analysis.R` | `raster_runner` |
-| 几何数据 | `scripts/geometry/`（待新增） | 未实现 | 复用或新增 runner |
+| 几何数据 | `scripts/geometry/` | 外接矩形法几何交叉验证 | `python_runner` |
 
 ### 新增一个算法
 
@@ -452,6 +452,14 @@ Set-Location .\desktop_client
 Rscript --version
 Rscript -e "library(terra); cat('terra ok\\n')"
 ```
+
+## 几何数据交叉验证
+
+工作台的“外接矩形法几何交叉验证”支持选择两个 Shapefile，分别配置类别字段，并通过“A 类别值 ↔ B 类别值 ↔ 显示名称”映射表处理两套数据编码不一致的情况。算法按类别生成轴对齐外接矩形候选对，在 0.1–0.9 九个 IoU 阈值下进行一对一贪心匹配，再使用修复后的原始面计算面 IoU、质心距离、面积误差、周长误差和地理加权指标。
+
+运行结果默认保存到 `几何数据算法/results/run_年月日_时分秒/`，包括 `tables/`、`figures/` 和 `report/`。原始 SHP 不会被修改；空几何会被排除，无效几何使用 `make_valid` 在内存中修复，数量记录在 `tables/run_metadata.json`。
+
+百万级 SHP 的八类全量分析属于重计算任务。当前测试数据在 10,000 m² 面积阈值下约需 10 分钟、峰值内存约 2 GB；建议先单类别试算确认映射和参数，再执行全部类别。运行期间客户端使用后台线程并显示进度条，请勿重复提交任务或直接关闭客户端。
 
 ## 当前限制
 

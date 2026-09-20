@@ -1,5 +1,7 @@
 """主窗口：顶部导航 + 左侧数据选择 + 页面堆栈 + 状态栏。"""
 from pathlib import Path
+from datetime import datetime
+import shutil
 
 from .pages import (
     AnalysisPage,
@@ -170,6 +172,7 @@ class SpatialValidationWindow(QMainWindow):
         self.workbench_page.runRequested.connect(self.run_analysis)
         self.data_panel.statusMessage.connect(self.set_status)
         self.data_page.statusMessage.connect(self.set_status)
+        self.data_page.navigationRequested.connect(self.navigate)
         self.preprocess_page.statusMessage.connect(self.set_status)
         self.analysis_page.statusMessage.connect(self.set_status)
         self.results_page.statusMessage.connect(self.set_status)
@@ -229,6 +232,13 @@ class SpatialValidationWindow(QMainWindow):
                 source_by_path[path].name if path in source_by_path else Path(path).stem
                 for path in raster_paths
             ]
+        elif parameters.get("analysis_type") == "geometry":
+            parameters = dict(parameters)
+            if not parameters.get("output_dir"):
+                parameters["output_dir"] = str(
+                    self.engine.project_dir.parent / "几何数据算法" / "results"
+                    / datetime.now().strftime("run_%Y%m%d_%H%M%S")
+                )
         elif parameters.get("analysis_type") == "attribute":
             shp_path = next(
                 (source.path for source in self.store.sources
@@ -294,6 +304,15 @@ class SpatialValidationWindow(QMainWindow):
         self._analysis_worker = None
 
     def export_current_report(self):
+        generated_report = self.latest_result.artifacts.get("report", "")
+        if self.latest_result.engine == "外接矩形法几何交叉验证" and generated_report and Path(generated_report).exists():
+            path, _ = QFileDialog.getSaveFileName(
+                self, "导出几何交叉验证报告", "几何交叉验证综合报告.md", "Markdown 文件 (*.md)",
+            )
+            if path:
+                shutil.copy2(generated_report, path)
+                self.set_status(f"报告已导出：{Path(path).name}")
+            return
         path, _ = QFileDialog.getSaveFileName(
             self, "导出分析报告", "空间数据交叉验证报告.md", "Markdown 文件 (*.md)",
         )

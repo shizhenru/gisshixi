@@ -1,5 +1,6 @@
 """结果与报告页：全局/局部摘要 + 图表 + 分析报告。"""
 import csv
+import os
 from pathlib import Path
 
 from ...qt_compat import (
@@ -8,6 +9,7 @@ from ...qt_compat import (
     QHBoxLayout,
     QLabel,
     QDialog,
+    QComboBox,
     QAbstractItemView,
     QPainter,
     QPixmap,
@@ -168,6 +170,11 @@ class ResultsPage(QWidget):
         self._scatter_path = ""
         self.local_specs = []
         self.local_labels = {}
+        self.local_summary_panel = None
+        self.geometry_table_combo = None
+        self.geometry_image_labels = {}
+        self.geometry_tab_indices = []
+        self._geometry_paths = {}
         self._build()
 
     def _build(self):
@@ -183,7 +190,8 @@ class ResultsPage(QWidget):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(12)
         content_layout.addWidget(self._global_summary_panel())
-        content_layout.addWidget(self._local_summary_panel())
+        self.local_summary_panel = self._local_summary_panel()
+        content_layout.addWidget(self.local_summary_panel)
         content_layout.addWidget(self._charts_panel())
         content_layout.addWidget(self._report_panel())
         scroll.setWidget(content)
@@ -247,13 +255,45 @@ class ResultsPage(QWidget):
             placeholder = QLabel("该图表暂未生成")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.chart_tabs.addTab(placeholder, name)
+        table_page = QWidget()
+        table_layout = QVBoxLayout(table_page)
+        table_layout.setContentsMargins(8, 8, 8, 8)
+        table_toolbar = QHBoxLayout()
+        table_toolbar.addWidget(QLabel("结果表"))
+        self.geometry_table_combo = QComboBox()
+        self.geometry_table_combo.setMinimumWidth(260)
+        self.geometry_table_combo.currentIndexChanged.connect(self._refresh_selected_geometry_table)
+        self.geometry_table_combo.hide()
+        table_toolbar.addWidget(self.geometry_table_combo)
+        table_toolbar.addStretch()
+        table_layout.addLayout(table_toolbar)
         self.pairwise_table = QTableWidget(0, 0)
         self.pairwise_table.setAlternatingRowColors(True)
         self.pairwise_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.pairwise_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.pairwise_table.setSortingEnabled(True)
         self.pairwise_table.setMinimumHeight(420)
-        self.chart_tabs.addTab(self.pairwise_table, "数据表格")
+        table_layout.addWidget(self.pairwise_table)
+        self.chart_tabs.addTab(table_page, "数据表格")
+        geometry_specs = [
+            ("figure_polygon_iou", "面 IoU"),
+            ("figure_centroid_distance_m", "质心距离"),
+            ("figure_absolute_relative_area_error", "面积误差"),
+            ("figure_absolute_relative_perimeter_error", "周长误差"),
+        ]
+        for key, title in geometry_specs:
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            image_label = ClickableImageLabel("本次分析未生成该图件")
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            image_label.setMinimumSize(640, 570)
+            image_label.setStyleSheet("background: #ffffff; border: 1px solid #dfe8e6; border-radius: 6px;")
+            image_label.doubleClicked.connect(lambda key=key: self._open_geometry_preview(key))
+            page_layout.addWidget(image_label)
+            index = self.chart_tabs.addTab(page, title)
+            self.chart_tabs.setTabVisible(index, False)
+            self.geometry_tab_indices.append(index)
+            self.geometry_image_labels[key] = image_label
         layout.addWidget(self.chart_tabs)
         return panel
 
@@ -270,15 +310,24 @@ class ResultsPage(QWidget):
         export = QPushButton("↓ 生成报告")
         export.setObjectName("PrimaryButton")
         export.clicked.connect(self.exportRequested.emit)
-        body.addWidget(export, alignment=Qt.AlignmentFlag.AlignRight)
+        button_row = QHBoxLayout()
+        self.open_output_button = QPushButton("打开结果目录")
+        self.open_output_button.setObjectName("OutlineButton")
+        self.open_output_button.clicked.connect(self._open_output_directory)
+        button_row.addStretch()
+        button_row.addWidget(self.open_output_button)
+        button_row.addWidget(export)
+        body.addLayout(button_row)
         return panel
 
     def update_result(self, result: AnalysisResult):
         self.result = result
         is_raster = result.engine == "R / terra"
+        is_geometry = result.engine == "外接矩形法几何交叉验证"
         raster_titles = ["ME", "MAE", "MRE", "RMSE", "相关系数", "有效像元"]
         attribute_titles = ["R²", "调整 R²", "AICc", "最优带宽", "ME", "MAE", "RMSE", "相关系数"]
-        titles = raster_titles if is_raster else attribute_titles
+        geometry_titles = ["类别数", "候选对", "推荐阈值", "推荐阈值匹配对"]
+        titles = geometry_titles if is_geometry else raster_titles if is_raster else attribute_titles
         for index, card in enumerate(self.metric_card_widgets):
             card.setVisible(index < len(titles))
             if index < len(titles):
@@ -288,15 +337,26 @@ class ResultsPage(QWidget):
             "ME": "me", "MAE": "mae", "MRE": "mre", "RMSE": "rmse",
             "相关系数": "correlation", "有效像元": "valid_cells",
         }
+        if is_geometry:
+            metric_names = {
+                "类别数": "categories", "候选对": "candidate_pairs",
+                "推荐阈值": "recommended_threshold", "推荐阈值匹配对": "matched_pairs",
+            }
         for title, key in metric_names.items():
             card = self.metric_cards.get(title)
             if card is not None:
                 value = result.metrics.get(key, result.metrics.get(title, "—"))
                 card.update_value(value, result.engine)
+        self.local_summary_panel.setVisible(not is_geometry)
         for key, (label, prefix) in self.local_labels.items():
             value = result.metrics.get(key, "—")
             label.setText(str(value))
-        self._refresh_pairwise_table(result)
+        self._set_geometry_mode(is_geometry)
+        if is_geometry:
+            self._refresh_geometry_table_choices(result)
+            self._refresh_geometry_images(result)
+        else:
+            self._refresh_pairwise_table(result)
         self._scatter_path = result.artifacts.get(
             "raster_scatter_matrix",
             result.artifacts.get("scatter", result.artifacts.get("raster_scatter", "")),
@@ -306,7 +366,7 @@ class ResultsPage(QWidget):
             self._scatter_preview.set_image(self._scatter_path)
         artifact_paths = list(result.artifacts.values())
         if artifact_paths:
-            visible_paths = [path for path in artifact_paths if Path(path).suffix.lower() in {".png", ".csv", ".tif", ".tiff"}]
+            visible_paths = [path for path in artifact_paths if Path(path).suffix.lower() in {".png", ".csv", ".json", ".md", ".tif", ".tiff"}]
             self.artifacts_text.setText("输出文件：\n" + "\n".join(visible_paths))
         elif result.output_dir:
             self.artifacts_text.setText(f"输出目录：{result.output_dir}")
@@ -317,15 +377,69 @@ class ResultsPage(QWidget):
                 f"RMSE {values.get('rmse', '—')}，相关系数 {values.get('correlation', '—')}"
                 for key, values in result.pairwise_metrics.items()
             )
-        self.report_text.setPlainText(
-            f"执行引擎：{result.engine}\n任务状态：{result.status}\n运行信息：{result.message}\n"
-            f"输出目录：{result.output_dir or '—'}{pairwise_note}"
-        )
+        report_path = result.artifacts.get("report", "") if is_geometry else ""
+        if report_path and Path(report_path).exists():
+            try:
+                self.report_text.setPlainText(Path(report_path).read_text(encoding="utf-8"))
+            except OSError:
+                self.report_text.setPlainText(result.message)
+        else:
+            self.report_text.setPlainText(
+                f"执行引擎：{result.engine}\n任务状态：{result.status}\n运行信息：{result.message}\n"
+                f"输出目录：{result.output_dir or '—'}{pairwise_note}"
+            )
 
-    def _refresh_pairwise_table(self, result: AnalysisResult):
-        if self.pairwise_table is None:
+    def _set_geometry_mode(self, enabled):
+        self.geometry_table_combo.setVisible(enabled)
+        for index in range(5):
+            self.chart_tabs.setTabVisible(index, not enabled)
+        self.chart_tabs.setTabVisible(5, True)
+        for index in self.geometry_tab_indices:
+            self.chart_tabs.setTabVisible(index, enabled)
+        self.chart_tabs.setCurrentIndex(self.geometry_tab_indices[0] if enabled else 0)
+
+    def _refresh_geometry_table_choices(self, result):
+        choices = [
+            ("总体阈值汇总", "overall_summary"),
+            ("分类阈值汇总", "category_summary"),
+            ("全部匹配明细", "matches"),
+            ("推荐阈值 GW 指标", "gw_metrics"),
+        ]
+        self.geometry_table_combo.blockSignals(True)
+        self.geometry_table_combo.clear()
+        for label, key in choices:
+            path = result.artifacts.get(key, "")
+            if path and Path(path).exists():
+                self.geometry_table_combo.addItem(label, path)
+        self.geometry_table_combo.blockSignals(False)
+        self._refresh_selected_geometry_table()
+
+    def _refresh_selected_geometry_table(self, *_):
+        if not self.geometry_table_combo or self.geometry_table_combo.count() == 0:
             return
-        headers, rows = self._load_pairwise_rows(result)
+        path = self.geometry_table_combo.currentData()
+        headers, rows = self._read_csv_rows(path, max_rows=5000)
+        self._fill_result_table(headers, rows)
+        if path and len(rows) == 5000:
+            self.statusMessage.emit("匹配明细较大，客户端仅预览前 5,000 行；CSV 文件保留全部数据")
+
+    @staticmethod
+    def _read_csv_rows(path, max_rows=5000):
+        if not path or not Path(path).exists():
+            return [], []
+        try:
+            with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = []
+                for index, row in enumerate(reader):
+                    if index >= max_rows:
+                        break
+                    rows.append(row)
+                return reader.fieldnames or [], rows
+        except (OSError, UnicodeError):
+            return [], []
+
+    def _fill_result_table(self, headers, rows):
         self.pairwise_table.setSortingEnabled(False)
         self.pairwise_table.clear()
         self.pairwise_table.setColumnCount(len(headers))
@@ -334,10 +448,58 @@ class ResultsPage(QWidget):
         for row_index, row in enumerate(rows):
             for column_index, header in enumerate(headers):
                 value = row.get(header, "")
-                text = f"{value:.6g}" if isinstance(value, float) else str(value) if value is not None else ""
-                self.pairwise_table.setItem(row_index, column_index, QTableWidgetItem(text))
+                self.pairwise_table.setItem(row_index, column_index, QTableWidgetItem(str(value) if value is not None else ""))
         self.pairwise_table.resizeColumnsToContents()
         self.pairwise_table.setSortingEnabled(True)
+
+    def _refresh_geometry_images(self, result):
+        self._geometry_paths = {}
+        for key, label in self.geometry_image_labels.items():
+            path = result.artifacts.get(key, "")
+            self._geometry_paths[key] = path
+            self._set_image_label(label, path, "本次分析未生成该图件")
+
+    @staticmethod
+    def _set_image_label(label, path, missing_text):
+        if not path or not Path(path).exists():
+            label.setPixmap(QPixmap())
+            label.setText(missing_text)
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            label.setText("图件读取失败")
+            return
+        label.setText("")
+        label.setPixmap(pixmap.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
+    def _open_geometry_preview(self, key):
+        path = self._geometry_paths.get(key, "")
+        if not path or not Path(path).exists():
+            return
+        if self._scatter_preview is None:
+            self._scatter_preview = ScatterPreviewDialog(path, self)
+        else:
+            self._scatter_preview.set_image(path)
+        self._scatter_preview.setWindowTitle("几何交叉验证图件预览")
+        self._scatter_preview.show()
+        self._scatter_preview.raise_()
+        self._scatter_preview.activateWindow()
+
+    def _open_output_directory(self):
+        path = self.result.output_dir
+        if not path or not Path(path).exists():
+            self.statusMessage.emit("本次结果目录不存在")
+            return
+        try:
+            os.startfile(path)
+        except OSError as exc:
+            self.statusMessage.emit(f"无法打开结果目录：{exc}")
+
+    def _refresh_pairwise_table(self, result: AnalysisResult):
+        if self.pairwise_table is None:
+            return
+        headers, rows = self._load_pairwise_rows(result)
+        self._fill_result_table(headers, rows)
 
     @staticmethod
     def _load_pairwise_rows(result: AnalysisResult):
@@ -404,3 +566,5 @@ class ResultsPage(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._refresh_scatter_image()
+        for key, label in self.geometry_image_labels.items():
+            self._set_image_label(label, self._geometry_paths.get(key, ""), "本次分析未生成该图件")

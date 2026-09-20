@@ -12,12 +12,15 @@ from ...qt_compat import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPalette,
     QPushButton,
     QSpinBox,
     QDoubleSpinBox,
     QScrollArea,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -25,7 +28,7 @@ from ...qt_compat import (
     Signal,
 )
 from ...widgets import ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
-from core.io.readers import read_attributes
+from core.io.readers import read_attributes, read_unique_values
 from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
 from core.raster_processing import RasterPreprocessor
 from core.symbology import FIELD_INFO, auto_colors, classify
@@ -225,13 +228,17 @@ class WorkbenchPage(QWidget):
             )
         body.setSpacing(10)
 
-        self.y_combo = self._add_select(body, "因变量 Y")
-        self.x_combo = self._add_select(body, "自变量 X")
-        self.kernel_combo = self._add_select(body, "核函数", ["双平方核", "高斯核", "指数核"])
+        self.attribute_options = QWidget()
+        attribute_layout = QVBoxLayout(self.attribute_options)
+        attribute_layout.setContentsMargins(0, 0, 0, 0)
+        attribute_layout.setSpacing(10)
+        self.y_combo = self._add_select(attribute_layout, "因变量 Y")
+        self.x_combo = self._add_select(attribute_layout, "自变量 X")
+        self.kernel_combo = self._add_select(attribute_layout, "核函数", ["双平方核", "高斯核", "指数核"])
 
         label = QLabel("带宽")
         label.setObjectName("Muted")
-        body.addWidget(label)
+        attribute_layout.addWidget(label)
         bw_row = QHBoxLayout()
         self.bandwidth_input = QLineEdit("25")
         self.bandwidth_input.setFixedWidth(80)
@@ -243,13 +250,15 @@ class WorkbenchPage(QWidget):
         self.auto_bandwidth = QCheckBox("自动（AIC）")
         bw_row.addWidget(self.auto_bandwidth)
         bw_row.addStretch()
-        body.addLayout(bw_row)
+        attribute_layout.addLayout(bw_row)
 
-        self.bandwidth_mode_combo = self._add_select(body, "带宽含义", ["最近邻个数", "距离（米）"])
+        self.bandwidth_mode_combo = self._add_select(attribute_layout, "带宽含义", ["最近邻个数", "距离（米）"])
+        body.addWidget(self.attribute_options)
         self.backend_combo = self._add_select(
             body, "算法后端",
             ["R 属性 GWR", "栅格 R / terra"],
         )
+        self.backend_combo.addItem("外接矩形法几何交叉验证")
         self.raster_options = QWidget()
         raster_layout = QVBoxLayout(self.raster_options)
         raster_layout.setContentsMargins(0, 8, 0, 0)
@@ -285,6 +294,71 @@ class WorkbenchPage(QWidget):
         self.raster_scatter_checkbox.setChecked(True)
         raster_layout.addWidget(self.raster_scatter_checkbox)
         body.addWidget(self.raster_options)
+
+        self.geometry_options = QWidget()
+        geometry_layout = QVBoxLayout(self.geometry_options)
+        geometry_layout.setContentsMargins(0, 8, 0, 0)
+        geometry_layout.setSpacing(8)
+        self.geometry_a_combo = self._add_select(geometry_layout, "几何数据 A")
+        self.geometry_b_combo = self._add_select(geometry_layout, "几何数据 B")
+        self.geometry_a_field_combo = self._add_select(geometry_layout, "A 类别字段")
+        self.geometry_b_field_combo = self._add_select(geometry_layout, "B 类别字段")
+        mapping_hint = QLabel("类别映射（双击单元格可修改；取消勾选可排除类别）")
+        mapping_hint.setObjectName("Muted")
+        mapping_hint.setWordWrap(True)
+        geometry_layout.addWidget(mapping_hint)
+        self.geometry_mapping_table = QTableWidget(0, 4)
+        self.geometry_mapping_table.setHorizontalHeaderLabels(["使用", "A 值", "B 值", "显示名称"])
+        self.geometry_mapping_table.verticalHeader().setVisible(False)
+        self.geometry_mapping_table.setMinimumHeight(150)
+        self.geometry_mapping_table.setColumnWidth(0, 48)
+        self.geometry_mapping_table.setColumnWidth(1, 70)
+        self.geometry_mapping_table.setColumnWidth(2, 70)
+        self.geometry_mapping_table.setColumnWidth(3, 105)
+        geometry_layout.addWidget(self.geometry_mapping_table)
+        self.geometry_crs_input = QLineEdit("EPSG:32650")
+        geometry_layout.addWidget(QLabel("计算投影 CRS"))
+        geometry_layout.addWidget(self.geometry_crs_input)
+        self.geometry_min_area_spin = QDoubleSpinBox()
+        self.geometry_min_area_spin.setRange(0, 1_000_000_000)
+        self.geometry_min_area_spin.setDecimals(2)
+        self.geometry_min_area_spin.setSuffix(" m²")
+        geometry_layout.addWidget(QLabel("最小面积阈值"))
+        geometry_layout.addWidget(self.geometry_min_area_spin)
+        self.geometry_thresholds_input = QLineEdit("0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9")
+        geometry_layout.addWidget(QLabel("外接矩形 IoU 阈值"))
+        geometry_layout.addWidget(self.geometry_thresholds_input)
+        self.geometry_bandwidth_spin = QDoubleSpinBox()
+        self.geometry_bandwidth_spin.setRange(1, 1_000_000)
+        self.geometry_bandwidth_spin.setValue(5000)
+        self.geometry_bandwidth_spin.setSuffix(" m")
+        geometry_layout.addWidget(QLabel("地理加权带宽"))
+        geometry_layout.addWidget(self.geometry_bandwidth_spin)
+        geometry_layout.addWidget(QLabel("输出目录（留空则使用项目运行目录）"))
+        output_row = QHBoxLayout()
+        self.geometry_output_input = QLineEdit()
+        output_row.addWidget(self.geometry_output_input, 1)
+        output_button = QPushButton("浏览…")
+        output_button.clicked.connect(self._browse_geometry_output)
+        output_row.addWidget(output_button)
+        geometry_layout.addLayout(output_row)
+        self.geometry_report_checkbox = QCheckBox("生成综合报告")
+        self.geometry_report_checkbox.setChecked(True)
+        self.geometry_figures_checkbox = QCheckBox("生成 4 张 3×3 综合图")
+        self.geometry_figures_checkbox.setChecked(True)
+        geometry_layout.addWidget(self.geometry_report_checkbox)
+        geometry_layout.addWidget(self.geometry_figures_checkbox)
+        self.geometry_validation_label = QLabel("等待配置校验")
+        self.geometry_validation_label.setWordWrap(True)
+        self.geometry_validation_label.setObjectName("Muted")
+        geometry_layout.addWidget(self.geometry_validation_label)
+        body.addWidget(self.geometry_options)
+        self.geometry_options.hide()
+
+        self.geometry_a_combo.currentIndexChanged.connect(self._refresh_geometry_fields)
+        self.geometry_b_combo.currentIndexChanged.connect(self._refresh_geometry_fields)
+        self.geometry_a_field_combo.currentTextChanged.connect(self._refresh_geometry_mapping)
+        self.geometry_b_field_combo.currentTextChanged.connect(self._refresh_geometry_mapping)
         self.backend_combo.currentTextChanged.connect(self._toggle_raster_options)
         self._refresh_raster_options()
         self._toggle_raster_options(self.backend_combo.currentText())
@@ -458,14 +532,152 @@ class WorkbenchPage(QWidget):
             if self.raster_list.item(index).checkState() == Qt.CheckState.Checked
         ]
 
+    def _refresh_geometry_sources(self):
+        sources = [s for s in self.store.sources if Path(s.path).suffix.lower() == ".shp"]
+        previous_a = self.geometry_a_combo.currentData()
+        previous_b = self.geometry_b_combo.currentData()
+        for combo in (self.geometry_a_combo, self.geometry_b_combo):
+            combo.blockSignals(True)
+            combo.clear()
+            for source in sources:
+                combo.addItem(source.name, source.path)
+            combo.blockSignals(False)
+        if previous_a and self.geometry_a_combo.findData(previous_a) >= 0:
+            self.geometry_a_combo.setCurrentIndex(self.geometry_a_combo.findData(previous_a))
+        if previous_b and self.geometry_b_combo.findData(previous_b) >= 0:
+            self.geometry_b_combo.setCurrentIndex(self.geometry_b_combo.findData(previous_b))
+        elif self.geometry_b_combo.count() > 1:
+            self.geometry_b_combo.setCurrentIndex(1)
+        self._refresh_geometry_fields()
+
+    def _source_for_path(self, path):
+        return next((source for source in self.store.sources if source.path == path), None)
+
+    def _refresh_geometry_fields(self, *_):
+        for source_combo, field_combo in (
+            (self.geometry_a_combo, self.geometry_a_field_combo),
+            (self.geometry_b_combo, self.geometry_b_field_combo),
+        ):
+            current = field_combo.currentText()
+            source = self._source_for_path(source_combo.currentData())
+            field_combo.blockSignals(True)
+            field_combo.clear()
+            if source:
+                field_combo.addItems(source.fields)
+            preferred = field_combo.findText("gridcode", Qt.MatchFlag.MatchFixedString)
+            if current and field_combo.findText(current) >= 0:
+                field_combo.setCurrentText(current)
+            elif preferred >= 0:
+                field_combo.setCurrentIndex(preferred)
+            field_combo.blockSignals(False)
+        self._refresh_geometry_mapping()
+
+    @staticmethod
+    def _value_sort_key(value):
+        try:
+            return (0, float(value))
+        except (TypeError, ValueError):
+            return (1, str(value))
+
+    def _refresh_geometry_mapping(self, *_):
+        path_a = self.geometry_a_combo.currentData()
+        path_b = self.geometry_b_combo.currentData()
+        field_a = self.geometry_a_field_combo.currentText()
+        field_b = self.geometry_b_field_combo.currentText()
+        values_a = sorted(read_unique_values(path_a, field_a), key=self._value_sort_key) if path_a and field_a else []
+        values_b = sorted(read_unique_values(path_b, field_b), key=self._value_sort_key) if path_b and field_b else []
+        common = sorted(set(values_a) & set(values_b), key=self._value_sort_key)
+        rest_a = [value for value in values_a if value not in common]
+        rest_b = [value for value in values_b if value not in common]
+        pairs = [(value, value) for value in common]
+        pairs.extend(
+            (rest_a[index] if index < len(rest_a) else "", rest_b[index] if index < len(rest_b) else "")
+            for index in range(max(len(rest_a), len(rest_b)))
+        )
+        self.geometry_mapping_table.setRowCount(len(pairs))
+        for row, (value_a, value_b) in enumerate(pairs):
+            enabled = QTableWidgetItem()
+            enabled.setFlags(enabled.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            enabled.setCheckState(Qt.CheckState.Checked if value_a and value_b else Qt.CheckState.Unchecked)
+            self.geometry_mapping_table.setItem(row, 0, enabled)
+            self.geometry_mapping_table.setItem(row, 1, QTableWidgetItem(value_a))
+            self.geometry_mapping_table.setItem(row, 2, QTableWidgetItem(value_b))
+            label = value_a if value_a == value_b else f"{value_a} ↔ {value_b}".strip()
+            self.geometry_mapping_table.setItem(row, 3, QTableWidgetItem(label))
+
+    def _browse_geometry_output(self):
+        path = QFileDialog.getExistingDirectory(self, "选择几何分析输出目录")
+        if path:
+            self.geometry_output_input.setText(path)
+
+    def _geometry_parameters(self):
+        path_a = self.geometry_a_combo.currentData() or ""
+        path_b = self.geometry_b_combo.currentData() or ""
+        if not path_a or not path_b:
+            return None, "请先导入并选择两个 SHP 数据"
+        if path_a == path_b:
+            return None, "几何数据 A 和 B 不能是同一个文件"
+        field_a = self.geometry_a_field_combo.currentText().strip()
+        field_b = self.geometry_b_field_combo.currentText().strip()
+        if not field_a or not field_b:
+            return None, "请分别选择 A 和 B 的类别字段"
+        mappings = []
+        for row in range(self.geometry_mapping_table.rowCount()):
+            enabled = self.geometry_mapping_table.item(row, 0)
+            if enabled is None or enabled.checkState() != Qt.CheckState.Checked:
+                continue
+            value_a = (self.geometry_mapping_table.item(row, 1).text() if self.geometry_mapping_table.item(row, 1) else "").strip()
+            value_b = (self.geometry_mapping_table.item(row, 2).text() if self.geometry_mapping_table.item(row, 2) else "").strip()
+            label = (self.geometry_mapping_table.item(row, 3).text() if self.geometry_mapping_table.item(row, 3) else "").strip()
+            if not value_a or not value_b:
+                return None, f"第 {row + 1} 行已启用，但 A/B 类别值不完整"
+            mappings.append({"a_value": value_a, "b_value": value_b, "label": label or f"{value_a}-{value_b}"})
+        if not mappings:
+            return None, "至少需要启用一组类别映射"
+        if len({m["a_value"] for m in mappings}) != len(mappings) or len({m["b_value"] for m in mappings}) != len(mappings):
+            return None, "启用的类别映射中存在重复的 A 值或 B 值"
+        try:
+            thresholds = [float(value.strip()) for value in self.geometry_thresholds_input.text().split(",") if value.strip()]
+        except ValueError:
+            return None, "IoU 阈值必须是用英文逗号分隔的数字"
+        if len(thresholds) != 9 or len(set(thresholds)) != 9 or any(value <= 0 or value > 1 for value in thresholds):
+            return None, "3×3 图要求填写 9 个不重复且位于 (0, 1] 的 IoU 阈值"
+        crs = self.geometry_crs_input.text().strip()
+        if not crs:
+            return None, "计算投影 CRS 不能为空"
+        return {
+            "analysis_type": "geometry",
+            "backend": "外接矩形法几何交叉验证",
+            "geometry_a": path_a,
+            "geometry_b": path_b,
+            "category_field_a": field_a,
+            "category_field_b": field_b,
+            "category_mappings": mappings,
+            "projected_crs": crs,
+            "min_area_m2": self.geometry_min_area_spin.value(),
+            "thresholds": sorted(thresholds),
+            "bandwidth_m": self.geometry_bandwidth_spin.value(),
+            "output_dir": self.geometry_output_input.text().strip(),
+            "write_report": self.geometry_report_checkbox.isChecked(),
+            "write_figures": self.geometry_figures_checkbox.isChecked(),
+        }, ""
+
     def _toggle_raster_options(self, backend):
         is_raster = backend.startswith("栅格")
+        is_geometry = backend == "外接矩形法几何交叉验证"
         self.raster_options.setVisible(is_raster)
+        self.geometry_options.setVisible(is_geometry)
+        self.attribute_options.setVisible(not is_raster and not is_geometry)
+        if is_geometry:
+            self._refresh_geometry_sources()
         save_result_shp = getattr(self, "save_result_shp", None)
         if save_result_shp is not None:
-            save_result_shp.setVisible(not is_raster)
+            save_result_shp.setVisible(not is_raster and not is_geometry)
 
     def collect_parameters(self) -> dict:
+        if self.backend_combo.currentText() == "外接矩形法几何交叉验证":
+            parameters, _ = self._geometry_parameters()
+            return parameters or {}
         parameters = AnalysisParameters(
             dependent_variable=self.y_combo.currentText(),
             independent_variable=self.x_combo.currentText(),
@@ -493,6 +705,25 @@ class WorkbenchPage(QWidget):
 
     def run(self):
         if not self.run_button.isEnabled():
+            return
+        if self.backend_combo.currentText() == "外接矩形法几何交叉验证":
+            parameters, error = self._geometry_parameters()
+            if error:
+                self.geometry_validation_label.setText("配置错误：" + error)
+                self.geometry_validation_label.setStyleSheet(
+                    "padding: 7px; color: #a23b32; background: #fdecea; border-radius: 4px;"
+                )
+                self.statusMessage.emit(error)
+                QMessageBox.warning(self, "几何配置检查", error)
+            else:
+                message = f"配置校验通过，正在提交 {len(parameters['category_mappings'])} 组类别进行计算…"
+                self.geometry_validation_label.setText(message)
+                self.geometry_validation_label.setStyleSheet(
+                    "padding: 7px; color: #1f695e; background: #e3f3ef; border-radius: 4px;"
+                )
+                self.statusMessage.emit(message)
+                self.set_run_busy(True)
+                self.runRequested.emit(parameters)
             return
         self.set_run_busy(True)
         self.runRequested.emit(self.collect_parameters())
@@ -760,6 +991,17 @@ class WorkbenchPage(QWidget):
     def update_result(self, result: AnalysisResult, shp_path=None):
         self.set_run_busy(False)
         self.latest_result = result
+        if self.backend_combo.currentText() == "外接矩形法几何交叉验证":
+            if result.status == "error":
+                self.geometry_validation_label.setText("计算失败：" + result.message)
+                self.geometry_validation_label.setStyleSheet(
+                    "padding: 7px; color: #a23b32; background: #fdecea; border-radius: 4px;"
+                )
+            else:
+                self.geometry_validation_label.setText(result.message)
+                self.geometry_validation_label.setStyleSheet(
+                    "padding: 7px; color: #1f695e; background: #e3f3ef; border-radius: 4px;"
+                )
         self._result_output_shp = getattr(result, "output_shp", "") or ""
         if shp_path and result.status == "success" and result.local_columns:
             self._show_results(shp_path, result.local_columns)
@@ -768,3 +1010,5 @@ class WorkbenchPage(QWidget):
 
     def update_after_data_change(self):
         self._refresh_raster_options()
+        if hasattr(self, "geometry_a_combo"):
+            self._refresh_geometry_sources()

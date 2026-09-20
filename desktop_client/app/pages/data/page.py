@@ -14,16 +14,19 @@ from ...qt_compat import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    Qt,
     Signal,
 )
 from ...widgets import panel_box
 from core.io.exporters import export_data_catalog
+from core.io.readers import inspect_shapefile
 
 
 class DataPage(QWidget):
     """登记多源数据，设定项目统一参数并做一致性检查。"""
 
     statusMessage = Signal(str)
+    navigationRequested = Signal(str)
 
     def __init__(self, store, parent=None):
         super().__init__(parent)
@@ -34,6 +37,7 @@ class DataPage(QWidget):
         self.extent_combo = None
         self.format_combo = None
         self.table = None
+        self.check_detail = None
         self._build()
 
     def _build(self):
@@ -95,7 +99,16 @@ class DataPage(QWidget):
         catalog_body.addWidget(self.table, 1)
         root.addWidget(catalog, 1)
 
+        checks_panel, checks_body = panel_box("GEOMETRY CHECK", "SHP 自动检查")
+        self.check_detail = QLabel("选择一条 SHP 数据查看配套文件、几何质量和类别值检查。")
+        self.check_detail.setWordWrap(True)
+        self.check_detail.setTextInteractionFlags(self.check_detail.textInteractionFlags() | Qt.TextInteractionFlag.TextSelectableByMouse)
+        checks_body.addWidget(self.check_detail)
+        root.addWidget(checks_panel)
+
         self.reference_combo.currentTextChanged.connect(self._on_reference_changed)
+        self.table.itemSelectionChanged.connect(self._show_selected_check)
+        self.table.cellClicked.connect(self._on_table_clicked)
         for combo in (self.crs_combo, self.resolution_combo, self.extent_combo, self.format_combo):
             combo.currentTextChanged.connect(self.refresh)
         self._refresh_reference_combo()
@@ -128,6 +141,8 @@ class DataPage(QWidget):
         self.reference_combo.clear()
         self.reference_combo.addItem("手动设置")
         for source in self.store.sources:
+            if Path(source.path).suffix.lower() == ".shp" and not source.geometry_checks:
+                source.geometry_checks = inspect_shapefile(source.path)
             self.reference_combo.addItem(source.name)
         self.reference_combo.blockSignals(False)
         items = [self.reference_combo.itemText(i) for i in range(self.reference_combo.count())]
@@ -194,7 +209,12 @@ class DataPage(QWidget):
                 self._mark_red(row, 4)
             # 操作：标红行可跳转预处理
             if source.crs != std_crs or (source.data_type == "栅格数据" and res != std_res) or (fmt != std_format):
-                link = QTableWidgetItem("→ 去预处理")
+                action_text = "→ 几何检查" if Path(source.path).suffix.lower() == ".shp" else "→ 去预处理"
+                link = QTableWidgetItem(action_text)
+                link.setForeground(QColor("#2d6bb8"))
+                self.table.setItem(row, 5, link)
+            elif Path(source.path).suffix.lower() == ".shp":
+                link = QTableWidgetItem("→ 几何检查")
                 link.setForeground(QColor("#2d6bb8"))
                 self.table.setItem(row, 5, link)
             self.table.item(row, 0).setToolTip(self._tooltip(source))
@@ -207,6 +227,53 @@ class DataPage(QWidget):
         if item is not None:
             item.setForeground(QColor("#d86659"))
             item.setBackground(QColor("#fdecea"))
+
+    def _show_selected_check(self):
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        if not rows or rows[0] >= len(self.store.sources):
+            return
+        source = self.store.sources[rows[0]]
+        if Path(source.path).suffix.lower() != ".shp":
+            self.check_detail.setText("当前选择不是 SHP；几何交叉验证检查仅针对 Shapefile。")
+            return
+        c = source.geometry_checks or inspect_shapefile(source.path)
+        source.geometry_checks = c
+        sidecars = c.get("sidecars", {})
+        files = "  ".join(f"{ext}: {'✓' if ok else '缺失'}" for ext, ok in sidecars.items())
+        types = "、".join(c.get("geometry_types", [])) or source.geometry_type or "未识别"
+        category_lines = []
+        for field, info in c.get("category_fields", {}).items():
+            values = "、".join(info.get("values", [])) or "无非空值"
+            suffix = "（仅显示前100项）" if info.get("truncated") else ""
+            category_lines.append(f"  {field}：{values}{suffix}")
+        categories = "\n".join(category_lines) if category_lines else "  未自动识别到类别字段"
+        warnings = c.get("warnings", [])
+        conclusion = "通过，可用于后续配置" if not warnings else "需要关注：" + "；".join(warnings)
+        inspection_scope = (
+            f"前 {c.get('inspected_count', 0):,} / {c.get('total_features', 0):,} 个要素（抽检）"
+            if c.get("sampled") else f"全部 {c.get('inspected_count', 0):,} 个要素"
+        )
+        self.check_detail.setText(
+            f"数据：{source.name}\n"
+            f"配套文件：{files}\n"
+            f"几何类型：{types}（{'面数据' if c.get('is_polygon') else '非面数据'}）\n"
+            f"CRS：{'已定义' if c.get('has_crs') else '未定义'}\n"
+            f"几何质量检查范围：{inspection_scope}\n"
+            f"空几何：{c.get('empty_count', 0)}；缺失几何：{c.get('null_geometry_count', 0)}；无效几何：{c.get('invalid_count', 0)}\n"
+            f"候选类别字段与值：\n{categories}\n"
+            f"检查结论：{conclusion}"
+        )
+
+    def _on_table_clicked(self, row, column):
+        if column != 5 or row >= len(self.store.sources):
+            return
+        source = self.store.sources[row]
+        if Path(source.path).suffix.lower() == ".shp":
+            self.table.selectRow(row)
+            self._show_selected_check()
+            self.statusMessage.emit("已显示 SHP 几何检查；第三阶段将从这里进入类别映射配置")
+        else:
+            self.navigationRequested.emit("preprocess")
 
     @staticmethod
     def _tooltip(source) -> str:

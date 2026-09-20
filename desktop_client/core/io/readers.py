@@ -398,7 +398,104 @@ def _read_shapefile(path: Path) -> dict[str, Any]:
     result = _base(extent, crs, f"{row_count:,} 要素" if row_count else "-",
                    "shapefile", fields=fields, row_count=row_count,
                    geometry_type=geometry_type, warnings=warnings)
+    result["geometry_checks"] = inspect_shapefile(path)
+    result["warnings"].extend(result["geometry_checks"].get("warnings", []))
     return result
+
+
+def inspect_shapefile(path: str | Path) -> dict[str, Any]:
+    """Perform read-only checks needed before geometry cross-validation."""
+    shp_path = Path(path)
+    sidecars = {ext: shp_path.with_suffix(ext).exists() for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg")}
+    checks: dict[str, Any] = {
+        "sidecars": sidecars,
+        "is_polygon": False,
+        "geometry_types": [],
+        "empty_count": 0,
+        "invalid_count": 0,
+        "has_crs": sidecars[".prj"],
+        "category_fields": {},
+        "warnings": [],
+        "inspected_count": 0,
+        "total_features": 0,
+        "sampled": False,
+    }
+    missing_required = [ext for ext in (".shp", ".shx", ".dbf") if not sidecars[ext]]
+    if missing_required:
+        checks["warnings"].append("缺少 Shapefile 配套文件：" + "、".join(missing_required))
+    if not sidecars[".prj"]:
+        checks["warnings"].append("缺少 .prj，无法确认坐标系")
+    try:
+        import geopandas as gpd
+        all_fields = []
+        try:
+            import pyogrio
+            info = pyogrio.read_info(shp_path)
+            checks["total_features"] = int(info.get("features") or 0)
+            declared_type = str(info.get("geometry_type") or "")
+            all_fields = [str(value) for value in info.get("fields", [])]
+        except Exception:  # noqa: BLE001
+            declared_type = ""
+        inspection_limit = 50000
+        frame = gpd.read_file(shp_path, rows=inspection_limit)
+        checks["inspected_count"] = len(frame)
+        if not checks["total_features"]:
+            checks["total_features"] = len(frame)
+        checks["sampled"] = checks["total_features"] > len(frame)
+        geom_types = sorted(str(v) for v in frame.geometry.geom_type.dropna().unique())
+        if not geom_types and declared_type:
+            geom_types = [declared_type]
+        checks["geometry_types"] = geom_types
+        checks["is_polygon"] = bool(geom_types) and all(v in {"Polygon", "MultiPolygon"} for v in geom_types)
+        checks["empty_count"] = int(frame.geometry.is_empty.sum())
+        checks["invalid_count"] = int((~frame.geometry.is_valid & frame.geometry.notna()).sum())
+        checks["null_geometry_count"] = int(frame.geometry.isna().sum())
+        checks["has_crs"] = frame.crs is not None
+        if not checks["is_polygon"]:
+            checks["warnings"].append("几何交叉验证要求面或多面数据")
+        if checks["empty_count"] or checks["null_geometry_count"]:
+            checks["warnings"].append(
+                f"存在空几何 {checks['empty_count']} 个、缺失几何 {checks['null_geometry_count']} 个"
+            )
+        if checks["invalid_count"]:
+            checks["warnings"].append(f"存在无效几何 {checks['invalid_count']} 个")
+        hint_names = {"gridcode", "class", "class_id", "category", "category_id", "type", "code", "landcover"}
+        candidates = []
+        for column in all_fields or [str(value) for value in frame.columns if value != frame.geometry.name]:
+            key = str(column).lower()
+            if key not in hint_names and not any(token in key for token in ("class", "categor", "gridcode", "landcover")):
+                continue
+            candidates.append(str(column))
+        category_frame = frame
+        if candidates and checks["sampled"]:
+            try:
+                category_frame = pyogrio.read_dataframe(shp_path, columns=candidates, read_geometry=False)
+            except Exception:  # noqa: BLE001
+                category_frame = frame
+        for column in candidates:
+            values = category_frame[column].dropna().astype(str).drop_duplicates().tolist()
+            checks["category_fields"][str(column)] = {
+                "unique_count": len(values),
+                "values": values[:100],
+                "truncated": len(values) > 100,
+            }
+    except ImportError:
+        checks["warnings"].append("未安装 geopandas，无法执行完整几何检查")
+    except Exception as exc:  # noqa: BLE001
+        checks["warnings"].append(f"完整几何检查失败：{exc}")
+    return checks
+
+
+def read_unique_values(path: str | Path, field: str, limit: int = 500) -> list[str]:
+    """Read distinct non-null attribute values without loading geometry."""
+    try:
+        import pyogrio
+        frame = pyogrio.read_dataframe(path, columns=[field], read_geometry=False)
+        if field not in frame.columns:
+            return []
+        return frame[field].dropna().astype(str).drop_duplicates().tolist()[:limit]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _read_dbf(shp_path: Path) -> tuple[list[str], int]:

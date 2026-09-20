@@ -78,6 +78,7 @@ class ProjectStore:
             geometry_type=metadata.get("geometry_type", ""),
             warnings=metadata.get("warnings", []),
             reader=metadata.get("reader", ""),
+            geometry_checks=metadata.get("geometry_checks", {}),
         )
         self.sources.append(source)
         self._persist()

@@ -1,13 +1,39 @@
 @echo off
-set QT_ENABLE_HIGHDPI_SCALING=1
+setlocal
+set "QT_ENABLE_HIGHDPI_SCALING=1"
 cd /d "%~dp0"
-if defined SPATIAL_VALIDATION_PYTHON (
+
+if exist "%~dp0.venv\Scripts\python.exe" (
+  set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
+) else if defined SPATIAL_VALIDATION_PYTHON (
   set "PYTHON_EXE=%SPATIAL_VALIDATION_PYTHON%"
 ) else (
-  set "PYTHON_EXE=D:\Anaconda3_2024\Anaconda3_2024101\envs\gdal\python.exe"
+  echo [ERROR] Project virtual environment was not found:
+  echo         %~dp0.venv\Scripts\python.exe
+  echo.
+  echo Create it from this folder with:
+  echo   python -m venv .venv
+  echo   .venv\Scripts\python.exe -m pip install -r requirements.txt
+  echo.
+  pause
+  exit /b 1
 )
-if not exist "%PYTHON_EXE%" set "PYTHON_EXE=python"
-for %%I in ("%PYTHON_EXE%") do set "PYTHON_HOME=%%~dpI"
-set "PROJ_LIB=%PYTHON_HOME%\Library\share\proj"
-set "GDAL_DATA=%PYTHON_HOME%\Library\share\gdal"
+
+if not exist "%PYTHON_EXE%" (
+  echo [ERROR] Python executable was not found:
+  echo         %PYTHON_EXE%
+  echo.
+  pause
+  exit /b 1
+)
+
 "%PYTHON_EXE%" main.py
+set "APP_EXIT_CODE=%ERRORLEVEL%"
+if not "%APP_EXIT_CODE%"=="0" (
+  echo.
+  echo [ERROR] The client exited with code %APP_EXIT_CODE%.
+  echo Review the error message above before closing this window.
+  echo.
+  pause
+)
+exit /b %APP_EXIT_CODE%

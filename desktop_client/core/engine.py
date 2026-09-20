@@ -20,12 +20,16 @@ class AnalysisEngine:
         self.r_gwr_runner = RRunner(attribute_scripts / "gwr_attribute.R", rscript_path)
         raster_script = root.parent / "栅格数据算法" / "desktop_raster_terra_analysis.R"
         self.raster_runner = RasterTerraRunner(raster_script, rscript_path)
+        self.geometry_runner = PythonRunner(root / "core" / "algorithms" / "scripts" / "geometry" / "geometry_validation.py")
 
     def run(self, parameters: dict[str, Any]) -> AnalysisResult:
         output_path = self.project_dir / ".runtime" / "analysis_result.json"
         output_path.parent.mkdir(exist_ok=True)
         backend = parameters.get("backend", "R 属性 GWR")
         try:
+            if parameters.get("analysis_type") == "geometry":
+                payload = self.geometry_runner.run(parameters, output_path)
+                return AnalysisResult(status=payload.get("status", "success"), engine=payload.get("engine", "外接矩形法"), metrics={k: str(v) for k, v in payload.get("metrics", {}).items()}, message=payload.get("message", ""), output_path=str(output_path), output_dir=payload.get("output_dir", ""), artifacts=payload.get("artifacts", {}))
             if parameters.get("analysis_type") == "raster" or backend.startswith("栅格"):
                 payload = self.raster_runner.run(parameters, output_path)
                 return AnalysisResult(

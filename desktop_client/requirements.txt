@@ -1,18 +1,7 @@
-# 已在当前环境测试。可通过 app/qt_compat.py 改用 PySide6。
 PyQt6>=6.7
-
-# 可选依赖：安装后自动启用更完整的数据读取（不装也能运行）
-# openpyxl>=3.1    # XLSX 完整读取（字段名/样例/缺失值）
-rasterio>=1.3    # 栅格预处理与 GeoTIFF CRS/范围/分辨率统一
-matplotlib>=3.8  # 栅格散点图矩阵绘制
-
-# ──────────────────────────────────────────────────────────────
-# R 依赖（非 pip 包，pip 无法安装；清单见同目录 requirements.R）
-# 一键安装：Rscript requirements.R
-# ──────────────────────────────────────────────────────────────
-# jsonlite   算法适配器 JSON 读写（必需）
-# sf         属性数据 GWR（必需）
-# GWmodel    属性数据 GWR（必需）
-# sp         属性数据 GWR（必需）
-# terra      栅格分析（栅格 R / terra 后端，必需）
-# ggplot2    输出散点图（可选）
+rasterio>=1.3
+matplotlib>=3.8
+geopandas>=0.14
+shapely>=2.0
+pandas>=2.0
+scipy>=1.11

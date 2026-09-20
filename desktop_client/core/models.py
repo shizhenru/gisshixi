@@ -16,6 +16,7 @@ class DataSource:
     geometry_type: str = ""
     warnings: list[str] = field(default_factory=list)
     reader: str = ""
+    geometry_checks: dict[str, Any] = field(default_factory=dict)
 
     def summary(self) -> str:
         """一行人可读的读取结果摘要，用于状态栏提示。"""
