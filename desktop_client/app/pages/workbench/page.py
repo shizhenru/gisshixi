@@ -7,27 +7,33 @@ from ...qt_compat import (
     QColor,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QObject,
     QPalette,
     QPushButton,
+    QSlider,
     QSpinBox,
     QDoubleSpinBox,
     QScrollArea,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QThread,
     QToolTip,
     QVBoxLayout,
     QWidget,
     Qt,
     Signal,
+    Slot,
 )
 from ...widgets import ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
+from core.algorithms.r_runner import RRunner
 from core.io.readers import read_attributes, read_unique_values
 from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
 from core.raster_processing import RasterPreprocessor
@@ -67,15 +73,58 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+# 分层设色字段名 → 带宽探索逐带宽结果字段（与 gwr_attribute.R 写出的结果 SHP 字段对齐）
+_BANDWIDTH_FIELD_MAP = {
+    "Local_R2": "local_r2",
+    "Coeff": "coefficient",
+    "Corr": "local_corr",
+    "LME": "lme",
+    "LMAE": "lmae",
+    "LMRE": "lmre",
+    "LRMSE": "lrmse",
+}
+
+
+class _BandwidthWorker(QObject):
+    """后台线程运行带宽区间 GWR，避免 R 子进程阻塞 UI。"""
+
+    finished = Signal(object, str)  # (dict|None, error)
+
+    def __init__(self, runner, config, output_path):
+        super().__init__()
+        self._runner = runner
+        self._config = config
+        self._output_path = output_path
+
+    @Slot()
+    def run(self):
+        try:
+            result = self._runner.run(self._config, self._output_path)
+            self.finished.emit(result, "")
+        except Exception as exc:  # noqa: BLE001 - 失败以错误文本回传
+            self.finished.emit(None, str(exc))
+
+
 class WorkbenchPage(QWidget):
     """设置 GWR 模型参数并运行；分析视图与属性表视图两个页签可随时切换。"""
 
     runRequested = Signal(dict)
     statusMessage = Signal(str)
 
-    def __init__(self, store, parent=None):
+    def __init__(self, store, parent=None, rscript_path=""):
         super().__init__(parent)
         self.store = store
+        self._rscript_path = rscript_path
+        self._bandwidth_script = (
+            Path(__file__).resolve().parents[3]
+            / "core" / "algorithms" / "scripts" / "attribute" / "gwr_bandwidth.R"
+        )
+        self._bandwidth_snapshots = None
+        self._bandwidth_color_cache = {}
+        self._bandwidth_legend_cache = {}
+        self._bandwidth_generating = False
+        self._bandwidth_thread = None
+        self._bandwidth_worker = None
         self.latest_result = AnalysisResult()
         self.map_canvas = None
         self.attr_hint = None
@@ -91,6 +140,24 @@ class WorkbenchPage(QWidget):
         self.raster_list = None
         self.raster_options = None
         self._build()
+
+    def set_rscript_path(self, path):
+        self._rscript_path = path
+
+    def current_vector_path(self):
+        """地图当前加载的矢量数据路径；非矢量或不存在时返回空串，供属性 GWR 取用。"""
+        path = self._map_path or ""
+        if Path(path).suffix.lower() in {".shp", ".gpkg", ".geojson"} and Path(path).exists():
+            return path
+        return ""
+
+    def source_vector_path(self):
+        """属性 GWR 的源数据：优先「数据管理」导入的原始矢量（而非运行后自动加载的结果 SHP），
+        确保带宽区间探索与主运行使用同一份数据。"""
+        for source in self.store.sources:
+            if Path(source.path).suffix.lower() in {".shp", ".gpkg", ".geojson"}:
+                return source.path
+        return self._map_path or ""
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -111,10 +178,7 @@ class WorkbenchPage(QWidget):
         top = QHBoxLayout()
         top.setSpacing(12)
 
-        # 左：地图（占满整列）
-        top.addWidget(self._map_panel(), 1)
-
-        # 右：模型参数（滚动条）+ 分层设色
+        # 右：模型参数（滚动条）+ 分层设色（先构建，带宽面板依赖 symbology_field_combo）
         right = QVBoxLayout()
         right.setSpacing(12)
         right.addWidget(self._parameter_panel(), 1)
@@ -122,6 +186,15 @@ class WorkbenchPage(QWidget):
         right_widget = QWidget()
         right_widget.setLayout(right)
         right_widget.setFixedWidth(360)
+
+        # 左：地图 + 带宽区间（带宽区间在地图下方，不占整行宽度）
+        left = QVBoxLayout()
+        left.setSpacing(12)
+        left.addWidget(self._map_panel(), 1)
+        self.bandwidth_panel = self._bandwidth_panel()
+        left.addWidget(self.bandwidth_panel)
+
+        top.addLayout(left, 1)
         top.addWidget(right_widget)
 
         layout.addLayout(top, 1)
@@ -166,6 +239,57 @@ class WorkbenchPage(QWidget):
         chart_button.clicked.connect(self._open_chart_window)
         hint_row.addWidget(chart_button)
         body.addLayout(hint_row)
+        return panel
+
+    def _bandwidth_panel(self):
+        panel, body = panel_box("BANDWIDTH", "带宽区间", "1–100 · 复用 Y/X/核函数")
+        body.setSpacing(8)
+
+        # 滑块 + 当前值 + 生成按钮
+        row = QHBoxLayout()
+        lo_label = QLabel("1")
+        lo_label.setObjectName("Muted")
+        row.addWidget(lo_label)
+        self.bandwidth_slider = QSlider(Qt.Orientation.Horizontal)
+        self.bandwidth_slider.setRange(1, 100)
+        self.bandwidth_slider.setSingleStep(1)
+        self.bandwidth_slider.setPageStep(10)
+        self.bandwidth_slider.setValue(50)
+        row.addWidget(self.bandwidth_slider, 1)
+        hi_label = QLabel("100")
+        hi_label.setObjectName("Muted")
+        row.addWidget(hi_label)
+        self.bandwidth_value = QLabel("50")
+        self.bandwidth_value.setStyleSheet("color: #2d8c7c; font-weight: 700;")
+        self.bandwidth_value.setMinimumWidth(26)
+        self.bandwidth_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self.bandwidth_value)
+        self.generate_button = QPushButton("生成快照")
+        self.generate_button.setObjectName("PrimaryButton")
+        row.addWidget(self.generate_button)
+        body.addLayout(row)
+
+        # 当前带宽关键指标 + 最佳带宽
+        self.bw_metrics_label = QLabel("拖动滑块自动生成并查看地图变化")
+        self.bw_metrics_label.setObjectName("Muted")
+        self.bw_metrics_label.setTextFormat(Qt.TextFormat.RichText)
+        self.bw_metrics_label.setWordWrap(True)
+        body.addWidget(self.bw_metrics_label)
+
+        # 横向分级图例
+        self.bw_legend_layout = QHBoxLayout()
+        self.bw_legend_layout.setSpacing(10)
+        body.addLayout(self.bw_legend_layout)
+
+        # 状态
+        self.bw_status = QLabel("")
+        self.bw_status.setObjectName("Muted")
+        self.bw_status.setWordWrap(True)
+        body.addWidget(self.bw_status)
+
+        self.bandwidth_slider.valueChanged.connect(self._on_bandwidth_slider_changed)
+        self.symbology_field_combo.currentTextChanged.connect(self._on_bandwidth_field_changed)
+        self.generate_button.clicked.connect(self._run_bandwidth_snapshots)
         return panel
 
     def _symbology_panel(self):
@@ -218,150 +342,24 @@ class WorkbenchPage(QWidget):
         return panel
 
     def _parameter_panel(self):
-        panel, body = panel_box("GWR MODEL", "模型参数", scrollable=True)
-        for scroll in panel.findChildren(QScrollArea):
-            scroll.setStyleSheet(
-                "QScrollBar:vertical { width: 7px; margin: 2px 1px 2px 1px; }"
-                "QScrollBar::handle:vertical { min-height: 28px; background: #b8c9c5; border-radius: 3px; }"
-                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
-                "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
-            )
+        panel, body = panel_box("GWR MODEL", "模型参数")
         body.setSpacing(10)
 
-        self.attribute_options = QWidget()
-        attribute_layout = QVBoxLayout(self.attribute_options)
-        attribute_layout.setContentsMargins(0, 0, 0, 0)
-        attribute_layout.setSpacing(10)
-        self.y_combo = self._add_select(attribute_layout, "因变量 Y")
-        self.x_combo = self._add_select(attribute_layout, "自变量 X")
-        self.kernel_combo = self._add_select(attribute_layout, "核函数", ["双平方核", "高斯核", "指数核"])
-
-        label = QLabel("带宽")
-        label.setObjectName("Muted")
-        attribute_layout.addWidget(label)
-        bw_row = QHBoxLayout()
-        self.bandwidth_input = QLineEdit("25")
-        self.bandwidth_input.setFixedWidth(80)
-        self.bandwidth_input.setFixedHeight(32)
-        self.bw_unit = QLabel("近邻")
-        self.bw_unit.setObjectName("Muted")
-        bw_row.addWidget(self.bandwidth_input)
-        bw_row.addWidget(self.bw_unit)
-        self.auto_bandwidth = QCheckBox("自动（AIC）")
-        bw_row.addWidget(self.auto_bandwidth)
-        bw_row.addStretch()
-        attribute_layout.addLayout(bw_row)
-
-        self.bandwidth_mode_combo = self._add_select(attribute_layout, "带宽含义", ["最近邻个数", "距离（米）"])
-        body.addWidget(self.attribute_options)
-        self.backend_combo = self._add_select(
-            body, "算法后端",
-            ["R 属性 GWR", "栅格 R / terra"],
-        )
-        self.backend_combo.addItem("外接矩形法几何交叉验证")
-        self.raster_options = QWidget()
-        raster_layout = QVBoxLayout(self.raster_options)
-        raster_layout.setContentsMargins(0, 8, 0, 0)
-        raster_layout.setSpacing(8)
-        raster_layout.addWidget(QLabel("分析栅格（至少选择两个）"), 0, Qt.AlignmentFlag.AlignLeft)
-        self.raster_list = QListWidget()
-        self.raster_list.setMinimumHeight(130)
-        self.raster_list.setMaximumHeight(220)
-        raster_layout.addWidget(self.raster_list)
-        raster_layout.addWidget(QLabel("局部窗口大小"), 0, Qt.AlignmentFlag.AlignLeft)
-        self.raster_window_spin = QSpinBox()
-        self.raster_window_spin.setRange(3, 99)
-        self.raster_window_spin.setSingleStep(2)
-        self.raster_window_spin.setValue(5)
-        raster_layout.addWidget(self.raster_window_spin)
-        raster_layout.addWidget(QLabel("重采样方法"), 0, Qt.AlignmentFlag.AlignLeft)
-        self.raster_resampling_combo = NoWheelComboBox()
-        self.raster_resampling_combo.addItems(["bilinear", "near", "cubic"])
-        self.raster_resampling_combo.setFixedHeight(32)
-        self._style_combo(self.raster_resampling_combo)
-        raster_layout.addWidget(self.raster_resampling_combo)
-        raster_layout.addWidget(QLabel("相对误差零值阈值"), 0, Qt.AlignmentFlag.AlignLeft)
-        self.raster_epsilon_spin = QDoubleSpinBox()
-        self.raster_epsilon_spin.setDecimals(12)
-        self.raster_epsilon_spin.setRange(0.0, 1.0)
-        self.raster_epsilon_spin.setSingleStep(1e-12)
-        self.raster_epsilon_spin.setValue(1e-12)
-        raster_layout.addWidget(self.raster_epsilon_spin)
-        self.raster_local_checkbox = QCheckBox("输出局部 GeoTIFF")
-        self.raster_local_checkbox.setChecked(True)
-        raster_layout.addWidget(self.raster_local_checkbox)
-        self.raster_scatter_checkbox = QCheckBox("输出像元散点图")
-        self.raster_scatter_checkbox.setChecked(True)
-        raster_layout.addWidget(self.raster_scatter_checkbox)
-        body.addWidget(self.raster_options)
-
-        self.geometry_options = QWidget()
-        geometry_layout = QVBoxLayout(self.geometry_options)
-        geometry_layout.setContentsMargins(0, 8, 0, 0)
-        geometry_layout.setSpacing(8)
-        self.geometry_a_combo = self._add_select(geometry_layout, "几何数据 A")
-        self.geometry_b_combo = self._add_select(geometry_layout, "几何数据 B")
-        self.geometry_a_field_combo = self._add_select(geometry_layout, "A 类别字段")
-        self.geometry_b_field_combo = self._add_select(geometry_layout, "B 类别字段")
-        mapping_hint = QLabel("类别映射（双击单元格可修改；取消勾选可排除类别）")
-        mapping_hint.setObjectName("Muted")
-        mapping_hint.setWordWrap(True)
-        geometry_layout.addWidget(mapping_hint)
-        self.geometry_mapping_table = QTableWidget(0, 4)
-        self.geometry_mapping_table.setHorizontalHeaderLabels(["使用", "A 值", "B 值", "显示名称"])
-        self.geometry_mapping_table.verticalHeader().setVisible(False)
-        self.geometry_mapping_table.setMinimumHeight(150)
-        self.geometry_mapping_table.setColumnWidth(0, 48)
-        self.geometry_mapping_table.setColumnWidth(1, 70)
-        self.geometry_mapping_table.setColumnWidth(2, 70)
-        self.geometry_mapping_table.setColumnWidth(3, 105)
-        geometry_layout.addWidget(self.geometry_mapping_table)
-        self.geometry_crs_input = QLineEdit("EPSG:32650")
-        geometry_layout.addWidget(QLabel("计算投影 CRS"))
-        geometry_layout.addWidget(self.geometry_crs_input)
-        self.geometry_min_area_spin = QDoubleSpinBox()
-        self.geometry_min_area_spin.setRange(0, 1_000_000_000)
-        self.geometry_min_area_spin.setDecimals(2)
-        self.geometry_min_area_spin.setSuffix(" m²")
-        geometry_layout.addWidget(QLabel("最小面积阈值"))
-        geometry_layout.addWidget(self.geometry_min_area_spin)
-        self.geometry_thresholds_input = QLineEdit("0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9")
-        geometry_layout.addWidget(QLabel("外接矩形 IoU 阈值"))
-        geometry_layout.addWidget(self.geometry_thresholds_input)
-        self.geometry_bandwidth_spin = QDoubleSpinBox()
-        self.geometry_bandwidth_spin.setRange(1, 1_000_000)
-        self.geometry_bandwidth_spin.setValue(5000)
-        self.geometry_bandwidth_spin.setSuffix(" m")
-        geometry_layout.addWidget(QLabel("地理加权带宽"))
-        geometry_layout.addWidget(self.geometry_bandwidth_spin)
-        geometry_layout.addWidget(QLabel("输出目录（留空则使用项目运行目录）"))
-        output_row = QHBoxLayout()
-        self.geometry_output_input = QLineEdit()
-        output_row.addWidget(self.geometry_output_input, 1)
-        output_button = QPushButton("浏览…")
-        output_button.clicked.connect(self._browse_geometry_output)
-        output_row.addWidget(output_button)
-        geometry_layout.addLayout(output_row)
-        self.geometry_report_checkbox = QCheckBox("生成综合报告")
-        self.geometry_report_checkbox.setChecked(True)
-        self.geometry_figures_checkbox = QCheckBox("生成 4 张 3×3 综合图")
-        self.geometry_figures_checkbox.setChecked(True)
-        geometry_layout.addWidget(self.geometry_report_checkbox)
-        geometry_layout.addWidget(self.geometry_figures_checkbox)
-        self.geometry_validation_label = QLabel("等待配置校验")
-        self.geometry_validation_label.setWordWrap(True)
-        self.geometry_validation_label.setObjectName("Muted")
-        geometry_layout.addWidget(self.geometry_validation_label)
-        body.addWidget(self.geometry_options)
-        self.geometry_options.hide()
+        self.param_tabs = QTabWidget()
+        self.param_tabs.setMinimumHeight(210)
+        self.param_tabs.addTab(self._attribute_options(), "属性数据")
+        self.param_tabs.addTab(self._raster_options(), "栅格数据")
+        self.param_tabs.addTab(self._geometry_options(), "几何数据")
+        body.addWidget(self.param_tabs)
 
         self.geometry_a_combo.currentIndexChanged.connect(self._refresh_geometry_fields)
         self.geometry_b_combo.currentIndexChanged.connect(self._refresh_geometry_fields)
         self.geometry_a_field_combo.currentTextChanged.connect(self._refresh_geometry_mapping)
         self.geometry_b_field_combo.currentTextChanged.connect(self._refresh_geometry_mapping)
-        self.backend_combo.currentTextChanged.connect(self._toggle_raster_options)
+        self.param_tabs.currentChanged.connect(self._on_mode_changed)
         self._refresh_raster_options()
-        self._toggle_raster_options(self.backend_combo.currentText())
+        self._on_mode_changed(self.param_tabs.currentIndex())
+
         self.save_result_shp = QCheckBox("运行后生成结果 SHP")
         self.save_result_shp.setChecked(True)
         body.addWidget(self.save_result_shp)
@@ -380,6 +378,152 @@ class WorkbenchPage(QWidget):
         footer_layout.addWidget(run_button)
         panel.layout().addWidget(footer)
         return panel
+
+    def _attribute_options(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget = QWidget()
+        widget.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.y_combo = self._add_select(layout, "因变量 Y")
+        self.x_combo = self._add_select(layout, "自变量 X")
+        self.kernel_combo = self._add_select(layout, "核函数", ["双平方核", "高斯核", "指数核"])
+
+        label = QLabel("带宽")
+        label.setObjectName("Muted")
+        layout.addWidget(label)
+        bw_row = QHBoxLayout()
+        self.bandwidth_input = QLineEdit("25")
+        self.bandwidth_input.setFixedWidth(80)
+        self.bandwidth_input.setFixedHeight(32)
+        self.bw_unit = QLabel("近邻")
+        self.bw_unit.setObjectName("Muted")
+        bw_row.addWidget(self.bandwidth_input)
+        bw_row.addWidget(self.bw_unit)
+        self.auto_bandwidth = QCheckBox("自动（AIC）")
+        bw_row.addWidget(self.auto_bandwidth)
+        bw_row.addStretch()
+        layout.addLayout(bw_row)
+
+        self.bandwidth_mode_combo = self._add_select(layout, "带宽含义", ["最近邻个数", "距离（米）"])
+        scroll.setWidget(widget)
+        self.attribute_options = scroll
+        return scroll
+
+    def _raster_options(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget = QWidget()
+        widget.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(QLabel("分析栅格（至少选择两个）"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_list = QListWidget()
+        self.raster_list.setMinimumHeight(130)
+        self.raster_list.setMaximumHeight(220)
+        layout.addWidget(self.raster_list)
+        layout.addWidget(QLabel("局部窗口大小"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_window_spin = QSpinBox()
+        self.raster_window_spin.setRange(3, 99)
+        self.raster_window_spin.setSingleStep(2)
+        self.raster_window_spin.setValue(5)
+        layout.addWidget(self.raster_window_spin)
+        layout.addWidget(QLabel("重采样方法"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_resampling_combo = NoWheelComboBox()
+        self.raster_resampling_combo.addItems(["bilinear", "near", "cubic"])
+        self.raster_resampling_combo.setFixedHeight(32)
+        self._style_combo(self.raster_resampling_combo)
+        layout.addWidget(self.raster_resampling_combo)
+        layout.addWidget(QLabel("相对误差零值阈值"), 0, Qt.AlignmentFlag.AlignLeft)
+        self.raster_epsilon_spin = QDoubleSpinBox()
+        self.raster_epsilon_spin.setDecimals(12)
+        self.raster_epsilon_spin.setRange(0.0, 1.0)
+        self.raster_epsilon_spin.setSingleStep(1e-12)
+        self.raster_epsilon_spin.setValue(1e-12)
+        layout.addWidget(self.raster_epsilon_spin)
+        self.raster_local_checkbox = QCheckBox("输出局部 GeoTIFF")
+        self.raster_local_checkbox.setChecked(True)
+        layout.addWidget(self.raster_local_checkbox)
+        self.raster_scatter_checkbox = QCheckBox("输出像元散点图")
+        self.raster_scatter_checkbox.setChecked(True)
+        layout.addWidget(self.raster_scatter_checkbox)
+        scroll.setWidget(widget)
+        self.raster_options = scroll
+        return scroll
+
+    def _geometry_options(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget = QWidget()
+        widget.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
+        self.geometry_a_combo = self._add_select(layout, "几何数据 A")
+        self.geometry_b_combo = self._add_select(layout, "几何数据 B")
+        self.geometry_a_field_combo = self._add_select(layout, "A 类别字段")
+        self.geometry_b_field_combo = self._add_select(layout, "B 类别字段")
+        mapping_hint = QLabel("类别映射（双击单元格可修改；取消勾选可排除类别）")
+        mapping_hint.setObjectName("Muted")
+        mapping_hint.setWordWrap(True)
+        layout.addWidget(mapping_hint)
+        self.geometry_mapping_table = QTableWidget(0, 4)
+        self.geometry_mapping_table.setHorizontalHeaderLabels(["使用", "A 值", "B 值", "显示名称"])
+        self.geometry_mapping_table.verticalHeader().setVisible(False)
+        self.geometry_mapping_table.setMinimumHeight(150)
+        self.geometry_mapping_table.setColumnWidth(0, 48)
+        self.geometry_mapping_table.setColumnWidth(1, 70)
+        self.geometry_mapping_table.setColumnWidth(2, 70)
+        self.geometry_mapping_table.setColumnWidth(3, 105)
+        layout.addWidget(self.geometry_mapping_table)
+        self.geometry_crs_input = QLineEdit("EPSG:32650")
+        layout.addWidget(QLabel("计算投影 CRS"))
+        layout.addWidget(self.geometry_crs_input)
+        self.geometry_min_area_spin = QDoubleSpinBox()
+        self.geometry_min_area_spin.setRange(0, 1_000_000_000)
+        self.geometry_min_area_spin.setDecimals(2)
+        self.geometry_min_area_spin.setSuffix(" m²")
+        layout.addWidget(QLabel("最小面积阈值"))
+        layout.addWidget(self.geometry_min_area_spin)
+        self.geometry_thresholds_input = QLineEdit("0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9")
+        layout.addWidget(QLabel("外接矩形 IoU 阈值"))
+        layout.addWidget(self.geometry_thresholds_input)
+        self.geometry_bandwidth_spin = QDoubleSpinBox()
+        self.geometry_bandwidth_spin.setRange(1, 1_000_000)
+        self.geometry_bandwidth_spin.setValue(5000)
+        self.geometry_bandwidth_spin.setSuffix(" m")
+        layout.addWidget(QLabel("地理加权带宽"))
+        layout.addWidget(self.geometry_bandwidth_spin)
+        layout.addWidget(QLabel("输出目录（留空则使用项目运行目录）"))
+        output_row = QHBoxLayout()
+        self.geometry_output_input = QLineEdit()
+        output_row.addWidget(self.geometry_output_input, 1)
+        output_button = QPushButton("浏览…")
+        output_button.clicked.connect(self._browse_geometry_output)
+        output_row.addWidget(output_button)
+        layout.addLayout(output_row)
+        self.geometry_report_checkbox = QCheckBox("生成综合报告")
+        self.geometry_report_checkbox.setChecked(True)
+        self.geometry_figures_checkbox = QCheckBox("生成 4 张 3×3 综合图")
+        self.geometry_figures_checkbox.setChecked(True)
+        layout.addWidget(self.geometry_report_checkbox)
+        layout.addWidget(self.geometry_figures_checkbox)
+        self.geometry_validation_label = QLabel("等待配置校验")
+        self.geometry_validation_label.setWordWrap(True)
+        self.geometry_validation_label.setObjectName("Muted")
+        layout.addWidget(self.geometry_validation_label)
+        scroll.setWidget(widget)
+        self.geometry_options = scroll
+        return scroll
 
     def _add_select(self, body, label_text, items=None):
         label = QLabel(label_text)
@@ -464,7 +608,13 @@ class WorkbenchPage(QWidget):
         self.bandwidth_input.setText(str(p.get("bandwidth", "25")))
         self.auto_bandwidth.setChecked(bool(p.get("auto_bandwidth", False)))
         self._set_combo(self.bandwidth_mode_combo, p.get("bandwidth_mode", "最近邻个数"))
-        self._set_combo(self.backend_combo, p.get("backend", "R 属性 GWR"))
+        backend = p.get("backend", "R 属性 GWR")
+        if backend == "栅格 R / terra":
+            self.param_tabs.setCurrentIndex(1)
+        elif backend == "外接矩形法几何交叉验证":
+            self.param_tabs.setCurrentIndex(2)
+        else:
+            self.param_tabs.setCurrentIndex(0)
         self.save_result_shp.setChecked(bool(p.get("write_shp", True)))
         self._update_bandwidth_unit()
         # 3. 设色还原
@@ -662,37 +812,47 @@ class WorkbenchPage(QWidget):
             "write_figures": self.geometry_figures_checkbox.isChecked(),
         }, ""
 
-    def _toggle_raster_options(self, backend):
-        is_raster = backend.startswith("栅格")
-        is_geometry = backend == "外接矩形法几何交叉验证"
-        self.raster_options.setVisible(is_raster)
-        self.geometry_options.setVisible(is_geometry)
-        self.attribute_options.setVisible(not is_raster and not is_geometry)
-        if is_geometry:
-            self._refresh_geometry_sources()
+    def _current_mode(self):
+        """根据当前页签返回分析模式：attribute / raster / geometry。"""
+        index = self.param_tabs.currentIndex()
+        if index == 1:
+            return "raster"
+        if index == 2:
+            return "geometry"
+        return "attribute"
+
+    def _on_mode_changed(self, _index):
+        mode = self._current_mode()
+        # 带宽区间面板只在「属性数据」页签显示（栅格/几何无需带宽区间）
+        bandwidth_panel = getattr(self, "bandwidth_panel", None)
+        if bandwidth_panel is not None:
+            bandwidth_panel.setVisible(mode == "attribute")
         save_result_shp = getattr(self, "save_result_shp", None)
         if save_result_shp is not None:
-            save_result_shp.setVisible(not is_raster and not is_geometry)
+            save_result_shp.setVisible(mode == "attribute")
+        if mode == "geometry":
+            self._refresh_geometry_sources()
 
     def collect_parameters(self) -> dict:
-        if self.backend_combo.currentText() == "外接矩形法几何交叉验证":
+        mode = self._current_mode()
+        if mode == "geometry":
             parameters, _ = self._geometry_parameters()
             return parameters or {}
+        backend = "栅格 R / terra" if mode == "raster" else "R 属性 GWR"
         parameters = AnalysisParameters(
             dependent_variable=self.y_combo.currentText(),
             independent_variable=self.x_combo.currentText(),
             kernel=self.kernel_combo.currentText(),
             bandwidth=self.bandwidth_input.text(),
             bandwidth_mode=self.bandwidth_mode_combo.currentText(),
-            backend=self.backend_combo.currentText(),
+            backend=backend,
         ).to_dict()
-        is_raster = self.backend_combo.currentText().startswith("栅格")
         parameters.update({
-            "analysis_type": "raster" if is_raster else "attribute",
+            "analysis_type": "raster" if mode == "raster" else "attribute",
             "auto_bandwidth": self.auto_bandwidth.isChecked(),
             "write_shp": self.save_result_shp.isChecked(),
         })
-        if is_raster:
+        if mode == "raster":
             parameters.update(RasterAnalysisParameters(
                 window_size=self.raster_window_spin.value(),
                 resampling=self.raster_resampling_combo.currentText(),
@@ -706,7 +866,7 @@ class WorkbenchPage(QWidget):
     def run(self):
         if not self.run_button.isEnabled():
             return
-        if self.backend_combo.currentText() == "外接矩形法几何交叉验证":
+        if self._current_mode() == "geometry":
             parameters, error = self._geometry_parameters()
             if error:
                 self.geometry_validation_label.setText("配置错误：" + error)
@@ -758,6 +918,7 @@ class WorkbenchPage(QWidget):
             for c, f in enumerate(self._map_fields):
                 self._map_values[f].append(row[c] if c < len(row) else None)
         self.map_canvas.load_shapes(geometry)
+        self._reset_bandwidth_explore()
         self._refresh_symbology_fields()
         if reset_xy:
             self._refresh_xy_from_map()
@@ -841,6 +1002,9 @@ class WorkbenchPage(QWidget):
         self.symbology_field_combo.blockSignals(False)
         if current and current in numeric:
             self.symbology_field_combo.setCurrentText(current)
+        elif "Local_R2" in numeric:
+            # 运行 GWR 后默认展示局部 R²（与带宽区间探索的地图着色一致）
+            self.symbology_field_combo.setCurrentText("Local_R2")
         self._update_field_tooltip()
         self._apply_symbology()
 
@@ -988,10 +1152,250 @@ class WorkbenchPage(QWidget):
         except OSError as exc:
             self.statusMessage.emit(f"保存失败：{exc}")
 
+    # ------------------------------------------------------------------ #
+    # 带宽区间探索
+    # ------------------------------------------------------------------ #
+    def _reset_bandwidth_explore(self):
+        self._bandwidth_snapshots = None
+        self._bandwidth_color_cache = {}
+        self._bandwidth_legend_cache = {}
+        self._bandwidth_generating = False
+        metrics = getattr(self, "bw_metrics_label", None)
+        if metrics is not None:
+            metrics.setText("生成带宽快照后显示各带宽指标")
+        legend_layout = getattr(self, "bw_legend_layout", None)
+        if legend_layout is not None:
+            clear_layout(legend_layout)
+        status = getattr(self, "bw_status", None)
+        if status is not None:
+            status.setText("在「分层设色」选好字段后，拖动滑块即自动生成并查看地图变化")
+
+    def _run_bandwidth_snapshots(self):
+        path = self.source_vector_path()
+        y = self.y_combo.currentText()
+        x = self.x_combo.currentText()
+        if not path:
+            self.statusMessage.emit("请先拖入 SHP 数据到地图")
+            return
+        if not y or not x:
+            self.statusMessage.emit("请选择因变量 Y 和自变量 X")
+            return
+        if y == x:
+            self.statusMessage.emit("因变量 Y 和自变量 X 不能相同")
+            return
+        config = {
+            "shp_path": path,
+            "dependent_variable": y,
+            "independent_variable": x,
+            "kernel": self.kernel_combo.currentText(),
+            "bandwidth_mode": self.bandwidth_mode_combo.currentText(),
+            "bandwidths": list(range(1, 101)),
+        }
+        output_path = self.store.project_dir / ".runtime" / "bandwidth_explore" / "result.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        runner = RRunner(self._bandwidth_script, self._rscript_path)
+        self._bandwidth_generating = True
+        self.generate_button.setEnabled(False)
+        self.generate_button.setText("⏳ 生成中…")
+        self.bw_status.setText(f"正在计算 {len(config['bandwidths'])} 个带宽…")
+        self.statusMessage.emit("正在生成带宽快照…")
+        thread = QThread(self)
+        worker = _BandwidthWorker(runner, config, output_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_bandwidth_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # 持有引用，避免线程/工作对象被 GC 导致 started 信号不触发。
+        self._bandwidth_thread = thread
+        self._bandwidth_worker = worker
+        thread.start()
+
+    @Slot(object, str)
+    def _on_bandwidth_finished(self, result, error):
+        self._bandwidth_generating = False
+        self.generate_button.setEnabled(True)
+        self.generate_button.setText("▶ 生成带宽快照")
+        if error:
+            self.bw_status.setText(f"生成失败：{error}")
+            self.statusMessage.emit(f"带宽快照生成失败：{error}")
+            return
+        if not result or result.get("status") != "success":
+            self.bw_status.setText(result.get("message", "生成失败") if result else "生成失败")
+            self.statusMessage.emit(result.get("message", "带宽快照生成失败") if result else "带宽快照生成失败")
+            return
+        bandwidths = [int(b) for b in result.get("bandwidths", [])]
+        curve = result.get("curve", [])
+        raw = {
+            "local_r2": result.get("local_r2", []),
+            "coefficient": result.get("coefficient", []),
+            "local_corr": result.get("local_corr", []),
+            "lme": result.get("lme", []),
+            "lmae": result.get("lmae", []),
+            "lmre": result.get("lmre", []),
+            "lrmse": result.get("lrmse", []),
+            "residual": result.get("residual", []),
+            "stud_residual": result.get("stud_residual", []),
+        }
+        if not bandwidths or len(raw["local_r2"]) != len(bandwidths):
+            self.bw_status.setText("带宽快照结果为空")
+            self.statusMessage.emit("带宽快照结果为空")
+            return
+        self._bandwidth_color_cache = {}
+        self._bandwidth_legend_cache = {}
+        self._bandwidth_snapshots = {"bandwidths": bandwidths, "curve": curve, "raw": raw}
+        self._on_bandwidth_slider_changed(self.bandwidth_slider.value())
+        self.bw_status.setText(f"已生成 {len(bandwidths)} 个带宽快照，拖动滑块查看地图变化")
+        self.statusMessage.emit(result.get("message", "带宽快照已生成"))
+
+    def _on_bandwidth_slider_changed(self, value):
+        self.bandwidth_value.setText(str(value))
+        self.statusMessage.emit(f"带宽：{value}")
+        if not self._bandwidth_snapshots:
+            # 尚未生成快照：拖动即自动触发一次预计算
+            if not getattr(self, "_bandwidth_generating", False):
+                self._run_bandwidth_snapshots()
+            return
+        index = self._bandwidth_index(value)
+        if index is None:
+            return
+        self._update_metric_line(index)
+        field = self._current_map_field()
+        if field:
+            self._update_bandwidth_legend(index)
+            self._set_bandwidth_map(index)
+
+    def _bandwidth_index(self, value):
+        bandwidths = self._bandwidth_snapshots.get("bandwidths", [])
+        if not bandwidths:
+            return None
+        if value in bandwidths:
+            return bandwidths.index(value)
+        # 滑块值落在区间之间时，取最近的一个带宽
+        nearest = min(range(len(bandwidths)), key=lambda i: abs(bandwidths[i] - value))
+        return nearest
+
+    def _update_metric_line(self, index):
+        curve = self._bandwidth_snapshots.get("curve", [])
+        if not (0 <= index < len(curve)):
+            return
+        item = curve[index]
+
+        def fmt(key, digits):
+            value = item.get(key)
+            if value is None:
+                return "—"
+            try:
+                text = f"{float(value):.{digits}f}"
+            except (TypeError, ValueError):
+                text = str(value)
+            return f"<b style='color:#1f695e'>{text}</b>"
+
+        parts = [
+            f"AICc {fmt('aicc', 1)}",
+            f"全局 R² {fmt('r2', 4)}",
+            f"局部 R² 中位数 {fmt('local_r2_median', 4)}",
+            f"残差 RMSE {fmt('residual_rmse', 3)}",
+        ]
+        best = self._best_bandwidth()
+        if best is not None:
+            parts.append(f"最佳带宽（AICc 最小）<b style='color:#e78338'>{best}</b>")
+        self.bw_metrics_label.setText("　·　".join(parts))
+
+    def _best_bandwidth(self):
+        curve = self._bandwidth_snapshots.get("curve", [])
+        best, best_aicc = None, None
+        for item in curve:
+            aicc = item.get("aicc")
+            if aicc is None:
+                continue
+            if best_aicc is None or aicc < best_aicc:
+                best_aicc = aicc
+                best = item.get("bandwidth")
+        return best
+
+    def _update_bandwidth_legend(self, index):
+        legend_layout = getattr(self, "bw_legend_layout", None)
+        if legend_layout is None:
+            return
+        field = self._current_map_field()
+        self._colors_for(field)  # 确保配色/图例缓存已计算
+        clear_layout(legend_layout)
+        entries = self._bandwidth_legend_cache.get(field, [])
+        if not (0 <= index < len(entries)):
+            return
+        breaks, colors = entries[index]
+        if not breaks or len(colors) < len(breaks) - 1:
+            return
+        hint = QLabel("图例")
+        hint.setObjectName("Muted")
+        legend_layout.addWidget(hint)
+        for i in range(len(breaks) - 1):
+            swatch = QLabel(" ")
+            swatch.setFixedSize(18, 14)
+            swatch.setStyleSheet(f"background: {colors[i]}; border: 1px solid #cbd5d2; border-radius: 2px;")
+            legend_layout.addWidget(swatch)
+            label = QLabel(f"{self._fmt_number(breaks[i])}–{self._fmt_number(breaks[i + 1])}")
+            label.setObjectName("Muted")
+            legend_layout.addWidget(label)
+        legend_layout.addStretch()
+
+    def _current_map_field(self):
+        """把分层设色的「设色字段」映射到带宽探索的逐带宽字段；非结果字段默认回退显示局部 R²。"""
+        field = self.symbology_field_combo.currentText()
+        return _BANDWIDTH_FIELD_MAP.get(field, "local_r2")
+
+    def _colors_for(self, field):
+        """返回某展示参数在每个带宽下的逐要素配色（惰性计算并缓存）。"""
+        if field not in self._bandwidth_color_cache:
+            raw = self._bandwidth_snapshots.get("raw", {}).get(field, [])
+            n_bands = len(self._bandwidth_snapshots.get("bandwidths", []))
+            if not raw:
+                self._bandwidth_color_cache[field] = [[]] * n_bands
+                self._bandwidth_legend_cache[field] = [([], [])] * n_bands
+            else:
+                entries = [self._build_feature_colors(vals) for vals in raw]
+                self._bandwidth_color_cache[field] = [entry[0] for entry in entries]
+                self._bandwidth_legend_cache[field] = [(entry[1], entry[2]) for entry in entries]
+        return self._bandwidth_color_cache[field]
+
+    def _on_bandwidth_field_changed(self, *_):
+        if not self._bandwidth_snapshots:
+            return
+        field = self._current_map_field()
+        if not field:
+            return
+        self._colors_for(field)
+        index = self._bandwidth_index(self.bandwidth_slider.value())
+        if index is not None:
+            self._update_bandwidth_legend(index)
+            self._set_bandwidth_map(index)
+
+    def _set_bandwidth_map(self, index):
+        colors = self._colors_for(self._current_map_field())
+        self.map_canvas.set_feature_colors(colors[index])
+
+    def _build_feature_colors(self, values):
+        """把一档带宽的展示参数按「分层设色」相同的方法分级并映射为每要素填充色（缺失为 None）。"""
+        method = self.symbology_method_combo.currentText()
+        n_classes = self.symbology_classes_spin.value()
+        manual = self._parse_manual_breaks() if method == "手动" else None
+        breaks, indices = classify(values, method, n_classes, manual)
+        nc = len(breaks) - 1
+        if nc <= 0:
+            return [], [], []
+        colors = auto_colors(values, nc)
+        feature_colors = [None] * len(indices)
+        for i, cls in enumerate(indices):
+            if cls is not None and 0 <= cls < nc:
+                feature_colors[i] = QColor(colors[cls])
+        return feature_colors, breaks, colors
+
     def update_result(self, result: AnalysisResult, shp_path=None):
         self.set_run_busy(False)
         self.latest_result = result
-        if self.backend_combo.currentText() == "外接矩形法几何交叉验证":
+        if self._current_mode() == "geometry":
             if result.status == "error":
                 self.geometry_validation_label.setText("计算失败：" + result.message)
                 self.geometry_validation_label.setStyleSheet(

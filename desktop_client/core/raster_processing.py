@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 RASTER_SUFFIXES = {".tif", ".tiff", ".img", ".asc"}
 
@@ -115,6 +117,9 @@ class RasterPreprocessor:
                 progress_callback(f"正在对齐 {source.name}（{i + 1}/{len(rasters)}）…")
             in_path = Path(source.path)
             out_path = self.output_dir / f"aligned_{in_path.stem}.tif"
+            # 防御：对齐结果只写到输出目录，绝不覆盖/改写原始数据文件。
+            if out_path.resolve() == in_path.resolve():
+                raise ValueError(f"对齐输出路径与源文件冲突，已拒绝覆盖：{in_path.name}")
             with rasterio.open(in_path) as src:
                 if src.count != 1:
                     raise ValueError(f"栅格必须是单波段：{source.name} 当前为 {src.count} 个波段")
@@ -124,6 +129,11 @@ class RasterPreprocessor:
                 src_res = src.res
                 src_bounds = src.bounds
                 src_nodata = src.nodata
+                # 统一识别无效像元：源声明了 nodata 时由 reproject 按值掩膜；
+                # 未声明 nodata 且为浮点型时，把 NaN 也当无效像元屏蔽（传 NaN 作为源
+                # nodata，reproject 会分块流式处理，避免整幅读入内存导致大栅格溢出）。
+                if src_nodata is None and np.issubdtype(src.dtypes[0], np.floating):
+                    src_nodata = float("nan")
                 # 统一输出 dtype 与 nodata：源 nodata 仅用于读取时识别无效像元，
                 # 输出统一为 UNIFIED_DTYPE / UNIFIED_NODATA，保证显示效果一致。
                 profile = target_profile.copy()

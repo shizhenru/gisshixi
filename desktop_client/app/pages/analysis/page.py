@@ -1,15 +1,12 @@
-"""空间分析页：栅格拉帘式对比 + 带宽区间探索。"""
+"""空间分析页：栅格拉帘式对比。"""
 from pathlib import Path
 from ...qt_compat import (
-    QFrame,
     QComboBox,
     QHBoxLayout,
     QLabel,
-    QSlider,
     QPushButton,
     QVBoxLayout,
     QWidget,
-    Qt,
     Signal,
 )
 from ...widgets import RasterSwipeCanvas, panel_box
@@ -17,7 +14,7 @@ from core.raster_processing import RasterPreprocessor, collect_raster_sources
 
 
 class AnalysisPage(QWidget):
-    """拉帘式对比两个数据源，并通过带宽区间探索 GWR 结果变化。"""
+    """拉帘式对比两个数据源。"""
 
     statusMessage = Signal(str)
 
@@ -35,7 +32,6 @@ class AnalysisPage(QWidget):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
         root.addWidget(self._swipe_panel(), 1)
-        root.addWidget(self._bandwidth_panel())
 
     def _swipe_panel(self):
         panel, body = panel_box("SWIPE COMPARE", "拉帘式对比", "同比例尺 · 同范围")
@@ -139,28 +135,3 @@ class AnalysisPage(QWidget):
         except Exception as exc:
             return f"栅格读取失败：{exc}"
         return ""
-
-    def _bandwidth_panel(self):
-        panel, body = panel_box("BANDWIDTH", "带宽区间", "步长 100")
-        row = QHBoxLayout()
-        row.addWidget(QLabel("100"))
-        self.bandwidth_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bandwidth_slider.setRange(100, 1000)
-        self.bandwidth_slider.setSingleStep(100)
-        self.bandwidth_slider.setPageStep(100)
-        self.bandwidth_slider.setValue(500)
-        self.bandwidth_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.bandwidth_slider.setTickInterval(100)
-        row.addWidget(self.bandwidth_slider, 1)
-        row.addWidget(QLabel("1000"))
-        self.bandwidth_value = QLabel("500")
-        self.bandwidth_value.setStyleSheet("color: #2d8c7c; font-weight: 700;")
-        row.addWidget(self.bandwidth_value)
-        body.addLayout(row)
-        self.bandwidth_slider.valueChanged.connect(
-            lambda value: self.bandwidth_value.setText(str(value))
-        )
-        self.bandwidth_slider.valueChanged.connect(
-            lambda value: self.statusMessage.emit(f"带宽：{value}")
-        )
-        return panel

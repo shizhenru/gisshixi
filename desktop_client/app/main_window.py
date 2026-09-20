@@ -107,7 +107,7 @@ class SpatialValidationWindow(QMainWindow):
         body_layout.addWidget(self.data_panel)
 
         self.stack = QStackedWidget()
-        self.workbench_page = WorkbenchPage(self.store)
+        self.workbench_page = WorkbenchPage(self.store, rscript_path=self.settings.value("rscript_path", ""))
         self.data_page = DataPage(self.store)
         self.preprocess_page = PreprocessPage(self.store)
         self.analysis_page = AnalysisPage(self.store)
@@ -209,6 +209,7 @@ class SpatialValidationWindow(QMainWindow):
         self.engine.r_runner.rscript_path = path
         self.engine.r_gwr_runner.rscript_path = path
         self.engine.raster_runner.rscript_path = path
+        self.workbench_page.set_rscript_path(path)
         self.set_status(f"已保存 Rscript 路径：{Path(path).name}")
 
     def run_analysis(self, parameters):
@@ -240,11 +241,16 @@ class SpatialValidationWindow(QMainWindow):
                     / datetime.now().strftime("run_%Y%m%d_%H%M%S")
                 )
         elif parameters.get("analysis_type") == "attribute":
-            shp_path = next(
-                (source.path for source in self.store.sources
-                 if Path(source.path).suffix.lower() in {".shp", ".gpkg", ".geojson"}),
-                None,
-            )
+            # 优先使用地图当前加载的矢量数据（可能是上一次运行输出的结果 SHP，
+            # 其中含 Local_R2 / Coeff / Corr / LME 等结果字段，可再作为 Y/X 二次分析）；
+            # 未加载矢量时回退到「数据管理」导入的第一个矢量数据。
+            shp_path = self.workbench_page.current_vector_path()
+            if not shp_path:
+                shp_path = next(
+                    (source.path for source in self.store.sources
+                     if Path(source.path).suffix.lower() in {".shp", ".gpkg", ".geojson"}),
+                    None,
+                )
             if not shp_path:
                 self.workbench_page.set_run_busy(False)
                 self.set_status("属性 GWR 分析需要先导入一个矢量数据（SHP/GeoPackage/GeoJSON）")
@@ -286,7 +292,7 @@ class SpatialValidationWindow(QMainWindow):
             # 自动加载结果 SHP 到地图，方便直接分层设色查看
             output_shp = getattr(result, "output_shp", "") or ""
             if output_shp and Path(output_shp).exists():
-                self.workbench_page.load_shp(output_shp, reset_xy=False)
+                self.workbench_page.load_shp(output_shp, reset_xy=True)
             self.set_status(f"分析完成：{result.engine}")
 
     def _render_scatter_for_result(self, result):
