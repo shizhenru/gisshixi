@@ -8,6 +8,7 @@ from ...qt_compat import (
     QComboBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -32,7 +33,8 @@ from ...qt_compat import (
     Signal,
     Slot,
 )
-from ...widgets import ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
+from ...widgets import BandwidthCurveCanvas, ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
+from core.algorithms.python_runner import PythonRunner
 from core.algorithms.r_runner import RRunner
 from core.io.readers import read_attributes, read_unique_values
 from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
@@ -84,9 +86,23 @@ _BANDWIDTH_FIELD_MAP = {
     "LRMSE": "lrmse",
 }
 
+# 带宽区间：各分析模式的取值区间 / 默认值 / 步长 / 单位
+_BANDWIDTH_MODES = {
+    "attribute": {"lo": 1, "hi": 100, "default": 50, "step": 1, "unit": "近邻", "hint": "复用 Y / X / 核函数"},
+    "raster": {"lo": 3, "hi": 99, "default": 5, "step": 2, "unit": "窗口", "hint": "复用栅格选择 / 重采样 / 零值阈值"},
+    "geometry": {"lo": 500, "hi": 10000, "default": 5000, "step": 500, "unit": "米", "hint": "复用类别映射 / 推荐 IoU 阈值"},
+}
+
+# 步长控件在各模式的取值范围（保证序列落在滑块区间内；栅格步长取偶数时窗口保持奇数）
+_BANDWIDTH_STEP_RANGES = {
+    "attribute": (1, 50),
+    "raster": (2, 96),
+    "geometry": (100, 5000),
+}
+
 
 class _BandwidthWorker(QObject):
-    """后台线程运行带宽区间 GWR，避免 R 子进程阻塞 UI。"""
+    """后台线程运行带宽区间探索（属性 R / 栅格 R / 几何 Python），避免子进程阻塞 UI。"""
 
     finished = Signal(object, str)  # (dict|None, error)
 
@@ -119,10 +135,21 @@ class WorkbenchPage(QWidget):
             Path(__file__).resolve().parents[3]
             / "core" / "algorithms" / "scripts" / "attribute" / "gwr_bandwidth.R"
         )
-        self._bandwidth_snapshots = None
-        self._bandwidth_color_cache = {}
-        self._bandwidth_legend_cache = {}
+        self._raster_bandwidth_script = (
+            Path(__file__).resolve().parents[3]
+            / "core" / "algorithms" / "scripts" / "raster" / "raster_bandwidth.R"
+        )
+        self._geometry_bandwidth_script = (
+            Path(__file__).resolve().parents[3]
+            / "core" / "algorithms" / "scripts" / "geometry" / "geometry_bandwidth.py"
+        )
+        self._bandwidth_snapshots = {}   # mode -> 快照 dict（各模式独立，切换页签不丢结果）
+        self._bandwidth_color_cache = {}  # (mode, field) -> 每档带宽的配色
+        self._bandwidth_legend_cache = {}  # (mode, field) -> 每档带宽的 (breaks, colors)
         self._bandwidth_generating = False
+        self._bandwidth_generating_mode = ""
+        self._bw_slider_values = {}  # mode -> 最近一次滑块值
+        self._bw_step_values = {}    # mode -> 最近一次步长
         self._bandwidth_thread = None
         self._bandwidth_worker = None
         self.latest_result = AnalysisResult()
@@ -242,23 +269,29 @@ class WorkbenchPage(QWidget):
         return panel
 
     def _bandwidth_panel(self):
-        panel, body = panel_box("BANDWIDTH", "带宽区间", "1–100 · 复用 Y/X/核函数")
-        body.setSpacing(8)
+        panel, body = panel_box("BANDWIDTH", "带宽区间", "拖动滑块 · 自动生成")
+        body.setSpacing(7)
+
+        # 模式说明（随「属性 / 栅格 / 几何」页签切换）
+        self.bw_mode_hint = QLabel("")
+        self.bw_mode_hint.setObjectName("Muted")
+        self.bw_mode_hint.setWordWrap(True)
+        body.addWidget(self.bw_mode_hint)
 
         # 滑块 + 当前值 + 生成按钮
         row = QHBoxLayout()
-        lo_label = QLabel("1")
-        lo_label.setObjectName("Muted")
-        row.addWidget(lo_label)
+        self.bw_lo_label = QLabel("1")
+        self.bw_lo_label.setObjectName("Muted")
+        row.addWidget(self.bw_lo_label)
         self.bandwidth_slider = QSlider(Qt.Orientation.Horizontal)
         self.bandwidth_slider.setRange(1, 100)
         self.bandwidth_slider.setSingleStep(1)
         self.bandwidth_slider.setPageStep(10)
         self.bandwidth_slider.setValue(50)
         row.addWidget(self.bandwidth_slider, 1)
-        hi_label = QLabel("100")
-        hi_label.setObjectName("Muted")
-        row.addWidget(hi_label)
+        self.bw_hi_label = QLabel("100")
+        self.bw_hi_label.setObjectName("Muted")
+        row.addWidget(self.bw_hi_label)
         self.bandwidth_value = QLabel("50")
         self.bandwidth_value.setStyleSheet("color: #2d8c7c; font-weight: 700;")
         self.bandwidth_value.setMinimumWidth(26)
@@ -268,6 +301,31 @@ class WorkbenchPage(QWidget):
         self.generate_button.setObjectName("PrimaryButton")
         row.addWidget(self.generate_button)
         body.addLayout(row)
+
+        # 步长（真正作用于带宽序列生成与滑块步进）
+        step_row = QHBoxLayout()
+        step_row.setSpacing(6)
+        step_label = QLabel("步长")
+        step_label.setObjectName("Muted")
+        step_row.addWidget(step_label)
+        self.bandwidth_step_spin = QSpinBox()
+        self.bandwidth_step_spin.setRange(1, 50)
+        self.bandwidth_step_spin.setValue(1)
+        self.bandwidth_step_spin.setFixedHeight(30)
+        self.bandwidth_step_spin.setFixedWidth(76)
+        step_row.addWidget(self.bandwidth_step_spin)
+        self.bw_step_unit = QLabel("近邻")
+        self.bw_step_unit.setObjectName("Muted")
+        step_row.addWidget(self.bw_step_unit)
+        self.bw_sequence_hint = QLabel("")
+        self.bw_sequence_hint.setObjectName("Muted")
+        step_row.addWidget(self.bw_sequence_hint, 1)
+        body.addLayout(step_row)
+
+        # 带宽—指标曲线
+        self.bw_curve = BandwidthCurveCanvas()
+        self.bw_curve.setFixedHeight(140)
+        body.addWidget(self.bw_curve)
 
         # 当前带宽关键指标 + 最佳带宽
         self.bw_metrics_label = QLabel("拖动滑块自动生成并查看地图变化")
@@ -288,50 +346,68 @@ class WorkbenchPage(QWidget):
         body.addWidget(self.bw_status)
 
         self.bandwidth_slider.valueChanged.connect(self._on_bandwidth_slider_changed)
+        self.bandwidth_step_spin.valueChanged.connect(self._on_bandwidth_step_changed)
         self.symbology_field_combo.currentTextChanged.connect(self._on_bandwidth_field_changed)
+        self.symbology_method_combo.currentTextChanged.connect(self._on_bandwidth_field_changed)
+        self.symbology_classes_spin.valueChanged.connect(self._on_bandwidth_field_changed)
         self.generate_button.clicked.connect(self._run_bandwidth_snapshots)
+        # 面板构建晚于参数页签，这里补一次模式配置（参数页签构建时面板还不存在）
+        self._apply_bandwidth_mode(self._current_mode())
         return panel
 
     def _symbology_panel(self):
         panel, body = panel_box("SYMBOLOGY", "分层设色", "分级渲染")
-        body.setSpacing(8)
+        body.setSpacing(6)
 
-        field_label_row = QHBoxLayout()
+        # 设色字段：标签 + 问号 + 下拉框（一行）
+        field_row = QHBoxLayout()
+        field_row.setSpacing(6)
         label = QLabel("设色字段")
         label.setObjectName("Muted")
-        field_label_row.addWidget(label)
+        field_row.addWidget(label)
         self.field_info_label = InfoIcon()
         self.field_info_label.set_info("鼠标悬停查看设色字段含义与分级配色说明")
-        field_label_row.addWidget(self.field_info_label)
-        field_label_row.addStretch()
-        body.addLayout(field_label_row)
-
+        field_row.addWidget(self.field_info_label)
         self.symbology_field_combo = QComboBox()
         self.symbology_field_combo.setFixedHeight(32)
         self._style_combo(self.symbology_field_combo)
-        body.addWidget(self.symbology_field_combo)
+        field_row.addWidget(self.symbology_field_combo, 1)
+        body.addLayout(field_row)
 
-        self.symbology_method_combo = self._add_select(body, "分类方法", ["自然间断点", "等间隔", "分位数", "手动"])
-
-        row = QHBoxLayout()
-        label = QLabel("分级数")
-        label.setObjectName("Muted")
-        row.addWidget(label)
+        # 分类方法 + 分级数（一行）
+        method_row = QHBoxLayout()
+        method_row.setSpacing(6)
+        method_label = QLabel("方法")
+        method_label.setObjectName("Muted")
+        method_row.addWidget(method_label)
+        self.symbology_method_combo = NoWheelComboBox()
+        self.symbology_method_combo.addItems(["自然间断点", "等间隔", "分位数", "手动"])
+        self.symbology_method_combo.setFixedHeight(32)
+        self.symbology_method_combo.setFixedWidth(128)
+        self._style_combo(self.symbology_method_combo)
+        method_row.addWidget(self.symbology_method_combo)
+        method_row.addStretch(1)
+        class_label = QLabel("分级数")
+        class_label.setObjectName("Muted")
+        method_row.addWidget(class_label)
         self.symbology_classes_spin = QSpinBox()
         self.symbology_classes_spin.setRange(2, 10)
         self.symbology_classes_spin.setValue(5)
         self.symbology_classes_spin.setFixedHeight(32)
-        row.addWidget(self.symbology_classes_spin)
-        row.addStretch()
-        body.addLayout(row)
+        self.symbology_classes_spin.setFixedWidth(72)
+        method_row.addWidget(self.symbology_classes_spin)
+        body.addLayout(method_row)
 
         self.manual_breaks_input = QLineEdit()
         self.manual_breaks_input.setPlaceholderText("逗号分隔断点，如 0, 10, 50, 100")
         self.manual_breaks_input.hide()
         body.addWidget(self.manual_breaks_input)
 
-        self.legend_layout = QVBoxLayout()
-        self.legend_layout.setSpacing(4)
+        self.legend_layout = QGridLayout()
+        self.legend_layout.setHorizontalSpacing(12)
+        self.legend_layout.setVerticalSpacing(3)
+        self.legend_layout.setColumnStretch(0, 1)
+        self.legend_layout.setColumnStretch(1, 1)
         body.addLayout(self.legend_layout)
 
         self.symbology_field_combo.currentTextChanged.connect(self._apply_symbology)
@@ -823,15 +899,48 @@ class WorkbenchPage(QWidget):
 
     def _on_mode_changed(self, _index):
         mode = self._current_mode()
-        # 带宽区间面板只在「属性数据」页签显示（栅格/几何无需带宽区间）
+        # 带宽区间面板对三种模式都可见（属性 / 栅格 / 几何各有带宽含义）
         bandwidth_panel = getattr(self, "bandwidth_panel", None)
         if bandwidth_panel is not None:
-            bandwidth_panel.setVisible(mode == "attribute")
+            bandwidth_panel.setVisible(True)
         save_result_shp = getattr(self, "save_result_shp", None)
         if save_result_shp is not None:
             save_result_shp.setVisible(mode == "attribute")
         if mode == "geometry":
             self._refresh_geometry_sources()
+        self._apply_bandwidth_mode(mode)
+
+    def _apply_bandwidth_mode(self, mode):
+        """按当前分析模式配置带宽区间面板：滑块范围 / 步长范围 / 单位 / 说明。"""
+        spec = _BANDWIDTH_MODES.get(mode)
+        slider = getattr(self, "bandwidth_slider", None)
+        if spec is None or slider is None:
+            return
+        lo, hi = spec["lo"], spec["hi"]
+        step_lo, step_hi = _BANDWIDTH_STEP_RANGES[mode]
+        slider.blockSignals(True)
+        self.bandwidth_step_spin.blockSignals(True)
+        slider.setRange(lo, hi)
+        self.bandwidth_step_spin.setRange(step_lo, step_hi)
+        step = self._bw_step_values.get(mode, spec["step"])
+        if not (step_lo <= step <= step_hi):
+            step = spec["step"]
+        self.bandwidth_step_spin.setValue(step)
+        slider.setSingleStep(step)
+        slider.setPageStep(max(step * 2, 1))
+        value = self._bw_slider_values.get(mode, spec["default"])
+        if not (lo <= value <= hi):
+            value = spec["default"]
+        slider.setValue(value)
+        slider.blockSignals(False)
+        self.bandwidth_step_spin.blockSignals(False)
+        self.bw_mode_hint.setText(spec["hint"])
+        self.bw_lo_label.setText(str(lo))
+        self.bw_hi_label.setText(str(hi))
+        self.bw_step_unit.setText(spec["unit"])
+        self._refresh_bandwidth_sequence_hint()
+        # 刷新展示（不自动触发快照生成）
+        self._on_bandwidth_slider_changed(slider.value(), auto_generate=False)
 
     def collect_parameters(self) -> dict:
         mode = self._current_mode()
@@ -1066,15 +1175,18 @@ class WorkbenchPage(QWidget):
     def _update_legend(self, breaks, colors):
         clear_layout(self.legend_layout)
         for i in range(len(breaks) - 1):
-            row = QHBoxLayout()
+            item = QWidget()
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(0, 0, 0, 0)
+            item_layout.setSpacing(4)
             swatch = QLabel(" ")
-            swatch.setFixedSize(18, 14)
+            swatch.setFixedSize(16, 12)
             swatch.setStyleSheet(f"background: {colors[i]}; border: 1px solid #cbd5d2; border-radius: 2px;")
-            row.addWidget(swatch)
-            label = QLabel(f"{self._fmt_number(breaks[i])} – {self._fmt_number(breaks[i + 1])}")
+            item_layout.addWidget(swatch)
+            label = QLabel(f"{self._fmt_number(breaks[i])}–{self._fmt_number(breaks[i + 1])}")
             label.setObjectName("Muted")
-            row.addWidget(label, 1)
-            self.legend_layout.addLayout(row)
+            item_layout.addWidget(label, 1)
+            self.legend_layout.addWidget(item, i // 2, i % 2)
 
     def _clear_legend(self):
         clear_layout(self.legend_layout)
@@ -1156,10 +1268,13 @@ class WorkbenchPage(QWidget):
     # 带宽区间探索
     # ------------------------------------------------------------------ #
     def _reset_bandwidth_explore(self):
-        self._bandwidth_snapshots = None
+        self._bandwidth_snapshots = {}
         self._bandwidth_color_cache = {}
         self._bandwidth_legend_cache = {}
         self._bandwidth_generating = False
+        curve = getattr(self, "bw_curve", None)
+        if curve is not None:
+            curve.clear()
         metrics = getattr(self, "bw_metrics_label", None)
         if metrics is not None:
             metrics.setText("生成带宽快照后显示各带宽指标")
@@ -1168,9 +1283,55 @@ class WorkbenchPage(QWidget):
             clear_layout(legend_layout)
         status = getattr(self, "bw_status", None)
         if status is not None:
-            status.setText("在「分层设色」选好字段后，拖动滑块即自动生成并查看地图变化")
+            status.setText("选好参数后，拖动滑块即自动生成并查看地图变化")
+
+    def _bandwidth_sequence(self):
+        """当前模式的带宽取值序列（步长真正生效：序列按步长生成并交给算法计算）。"""
+        mode = self._current_mode()
+        spec = _BANDWIDTH_MODES.get(mode, _BANDWIDTH_MODES["attribute"])
+        step = max(1, self.bandwidth_step_spin.value())
+        return list(range(spec["lo"], spec["hi"] + 1, step))
+
+    def _refresh_bandwidth_sequence_hint(self):
+        hint = getattr(self, "bw_sequence_hint", None)
+        if hint is None:
+            return
+        seq = self._bandwidth_sequence()
+        hint.setText(f"共 {len(seq)} 个取值（{seq[0]} ~ {seq[-1]}）")
+
+    def _on_bandwidth_step_changed(self, value):
+        """步长变化：同步滑块步进，并使当前模式的快照失效（旧序列不再匹配）。"""
+        mode = self._current_mode()
+        self._bw_step_values[mode] = value
+        self.bandwidth_slider.setSingleStep(max(1, value))
+        self.bandwidth_slider.setPageStep(max(value * 2, 1))
+        self._refresh_bandwidth_sequence_hint()
+        self._bandwidth_snapshots.pop(mode, None)
+        self._clear_bandwidth_caches(mode)
+        self._refresh_bandwidth_curve(mode)
+        metrics = getattr(self, "bw_metrics_label", None)
+        if metrics is not None:
+            metrics.setText("生成带宽快照后显示各带宽指标")
+        legend_layout = getattr(self, "bw_legend_layout", None)
+        if legend_layout is not None:
+            clear_layout(legend_layout)
+        self.bw_status.setText("步长已更新，请重新生成快照")
+
+    def _clear_bandwidth_caches(self, mode):
+        for cache in (self._bandwidth_color_cache, self._bandwidth_legend_cache):
+            for key in [key for key in cache if key[0] == mode]:
+                cache.pop(key, None)
 
     def _run_bandwidth_snapshots(self):
+        mode = self._current_mode()
+        if mode == "raster":
+            self._run_raster_bandwidth_snapshots()
+        elif mode == "geometry":
+            self._run_geometry_bandwidth_snapshots()
+        else:
+            self._run_attribute_bandwidth_snapshots()
+
+    def _run_attribute_bandwidth_snapshots(self):
         path = self.source_vector_path()
         y = self.y_combo.currentText()
         x = self.x_combo.currentText()
@@ -1189,15 +1350,67 @@ class WorkbenchPage(QWidget):
             "independent_variable": x,
             "kernel": self.kernel_combo.currentText(),
             "bandwidth_mode": self.bandwidth_mode_combo.currentText(),
-            "bandwidths": list(range(1, 101)),
+            "bandwidths": self._bandwidth_sequence(),
         }
-        output_path = self.store.project_dir / ".runtime" / "bandwidth_explore" / "result.json"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         runner = RRunner(self._bandwidth_script, self._rscript_path)
+        self._start_bandwidth_worker(runner, config, "attribute",
+                                     f"正在计算 {len(config['bandwidths'])} 个带宽…")
+
+    def _run_raster_bandwidth_snapshots(self):
+        paths = self._selected_raster_paths()
+        if len(paths) < 2:
+            self.statusMessage.emit("请先在「栅格数据」页签勾选至少两个栅格")
+            return
+        manifest = RasterPreprocessor(self.store.project_dir).latest_manifest() or {}
+        aligned_by_source = {
+            item.get("source_path"): item.get("aligned_path")
+            for item in manifest.get("processed", [])
+        }
+        aligned = [aligned_by_source.get(path, path) for path in paths]
+        source_by_path = {source.path: source for source in self.store.sources}
+        names = [
+            source_by_path[path].name if path in source_by_path else Path(path).stem
+            for path in paths
+        ]
+        config = {
+            "raster_paths": aligned,
+            "raster_names": names,
+            "window_sizes": self._bandwidth_sequence(),
+            "resampling": self.raster_resampling_combo.currentText(),
+            "zero_epsilon": self.raster_epsilon_spin.value(),
+            "preview_dir": str(self.store.project_dir / ".runtime" / "bandwidth_explore" / "raster_previews"),
+        }
+        runner = RRunner(self._raster_bandwidth_script, self._rscript_path)
+        self._start_bandwidth_worker(runner, config, "raster",
+                                     f"正在计算 {len(config['window_sizes'])} 个窗口大小…")
+
+    def _run_geometry_bandwidth_snapshots(self):
+        parameters, error = self._geometry_parameters()
+        if error:
+            self.statusMessage.emit(error)
+            return
+        config = dict(parameters)
+        config.pop("analysis_type", None)
+        config.pop("backend", None)
+        config.update({
+            "bandwidths": self._bandwidth_sequence(),
+            # 探索过程不产出报告/图片，全部落在 .runtime 临时目录
+            "write_report": False,
+            "write_figures": False,
+            "output_dir": str(self.store.project_dir / ".runtime" / "bandwidth_explore" / "geometry"),
+        })
+        runner = PythonRunner(self._geometry_bandwidth_script)
+        self._start_bandwidth_worker(runner, config, "geometry",
+                                     f"正在计算 {len(config['bandwidths'])} 个带宽（米）…")
+
+    def _start_bandwidth_worker(self, runner, config, mode, status_text):
+        output_path = self.store.project_dir / ".runtime" / "bandwidth_explore" / f"result_{mode}.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._bandwidth_generating_mode = mode
         self._bandwidth_generating = True
         self.generate_button.setEnabled(False)
         self.generate_button.setText("⏳ 生成中…")
-        self.bw_status.setText(f"正在计算 {len(config['bandwidths'])} 个带宽…")
+        self.bw_status.setText(status_text)
         self.statusMessage.emit("正在生成带宽快照…")
         thread = QThread(self)
         worker = _BandwidthWorker(runner, config, output_path)
@@ -1214,6 +1427,7 @@ class WorkbenchPage(QWidget):
 
     @Slot(object, str)
     def _on_bandwidth_finished(self, result, error):
+        mode = self._bandwidth_generating_mode or "attribute"
         self._bandwidth_generating = False
         self.generate_button.setEnabled(True)
         self.generate_button.setText("▶ 生成带宽快照")
@@ -1227,57 +1441,95 @@ class WorkbenchPage(QWidget):
             return
         bandwidths = [int(b) for b in result.get("bandwidths", [])]
         curve = result.get("curve", [])
-        raw = {
-            "local_r2": result.get("local_r2", []),
-            "coefficient": result.get("coefficient", []),
-            "local_corr": result.get("local_corr", []),
-            "lme": result.get("lme", []),
-            "lmae": result.get("lmae", []),
-            "lmre": result.get("lmre", []),
-            "lrmse": result.get("lrmse", []),
-            "residual": result.get("residual", []),
-            "stud_residual": result.get("stud_residual", []),
-        }
-        if not bandwidths or len(raw["local_r2"]) != len(bandwidths):
+        if mode == "raster":
+            raw = {"local_mae": result.get("local_mae", []), "previews": result.get("previews", [])}
+            empty = not bandwidths or len(raw["local_mae"]) != len(bandwidths)
+        elif mode == "geometry":
+            raw = {"gw_iou": result.get("gw_iou", [])}
+            empty = not bandwidths or len(raw["gw_iou"]) != len(bandwidths)
+        else:
+            raw = {
+                "local_r2": result.get("local_r2", []),
+                "coefficient": result.get("coefficient", []),
+                "local_corr": result.get("local_corr", []),
+                "lme": result.get("lme", []),
+                "lmae": result.get("lmae", []),
+                "lmre": result.get("lmre", []),
+                "lrmse": result.get("lrmse", []),
+                "residual": result.get("residual", []),
+                "stud_residual": result.get("stud_residual", []),
+            }
+            empty = not bandwidths or len(raw["local_r2"]) != len(bandwidths)
+        if empty:
             self.bw_status.setText("带宽快照结果为空")
             self.statusMessage.emit("带宽快照结果为空")
             return
-        self._bandwidth_color_cache = {}
-        self._bandwidth_legend_cache = {}
-        self._bandwidth_snapshots = {"bandwidths": bandwidths, "curve": curve, "raw": raw}
-        self._on_bandwidth_slider_changed(self.bandwidth_slider.value())
+        self._bandwidth_snapshots[mode] = {"mode": mode, "bandwidths": bandwidths, "curve": curve, "raw": raw}
+        self._clear_bandwidth_caches(mode)
+        self._refresh_bandwidth_curve(mode)
+        self._on_bandwidth_slider_changed(self.bandwidth_slider.value(), auto_generate=False)
         self.bw_status.setText(f"已生成 {len(bandwidths)} 个带宽快照，拖动滑块查看地图变化")
         self.statusMessage.emit(result.get("message", "带宽快照已生成"))
 
-    def _on_bandwidth_slider_changed(self, value):
-        self.bandwidth_value.setText(str(value))
-        self.statusMessage.emit(f"带宽：{value}")
-        if not self._bandwidth_snapshots:
+    def _refresh_bandwidth_curve(self, mode):
+        """把快照曲线喂给折线图控件；纵轴指标随模式取最常用的一个。"""
+        curve_widget = getattr(self, "bw_curve", None)
+        if curve_widget is None:
+            return
+        snapshots = self._bandwidth_snapshots.get(mode)
+        if not snapshots:
+            curve_widget.clear()
+            return
+        metric, name = {
+            "attribute": ("aicc", "AICc（越小越好）"),
+            "raster": ("rmse", "全局 RMSE（越小越好）"),
+            "geometry": ("gw_iou_median", "GW 面 IoU 中位数（越大越好）"),
+        }.get(mode, ("aicc", "AICc（越小越好）"))
+        points = [(item.get("bandwidth"), item.get(metric)) for item in snapshots.get("curve", [])]
+        curve_widget.set_data(points, name)
+
+    def _on_bandwidth_slider_changed(self, value, auto_generate=True):
+        mode = self._current_mode()
+        self._bw_slider_values[mode] = value
+        snapshots = self._bandwidth_snapshots.get(mode)
+        if not snapshots:
+            self.bandwidth_value.setText(str(value))
             # 尚未生成快照：拖动即自动触发一次预计算
-            if not getattr(self, "_bandwidth_generating", False):
+            if auto_generate and not getattr(self, "_bandwidth_generating", False):
                 self._run_bandwidth_snapshots()
             return
-        index = self._bandwidth_index(value)
+        index = self._bandwidth_index(value, mode)
         if index is None:
+            self.bandwidth_value.setText(str(value))
             return
+        bandwidths = snapshots.get("bandwidths", [])
+        self.bandwidth_value.setText(str(bandwidths[index]))
+        self.statusMessage.emit(f"带宽：{bandwidths[index]}")
         self._update_metric_line(index)
-        field = self._current_map_field()
-        if field:
-            self._update_bandwidth_legend(index)
-            self._set_bandwidth_map(index)
+        self._update_bandwidth_legend(index)
+        self._set_bandwidth_map(index)
+        curve_widget = getattr(self, "bw_curve", None)
+        if curve_widget is not None:
+            curve_widget.set_current_index(index)
 
-    def _bandwidth_index(self, value):
-        bandwidths = self._bandwidth_snapshots.get("bandwidths", [])
+    def _bandwidth_index(self, value, mode=None):
+        mode = mode or self._current_mode()
+        snapshots = self._bandwidth_snapshots.get(mode)
+        if not snapshots:
+            return None
+        bandwidths = snapshots.get("bandwidths", [])
         if not bandwidths:
             return None
         if value in bandwidths:
             return bandwidths.index(value)
-        # 滑块值落在区间之间时，取最近的一个带宽
+        # 滑块值落在取值之间时，取最近的一个带宽
         nearest = min(range(len(bandwidths)), key=lambda i: abs(bandwidths[i] - value))
         return nearest
 
     def _update_metric_line(self, index):
-        curve = self._bandwidth_snapshots.get("curve", [])
+        mode = self._current_mode()
+        snapshots = self._bandwidth_snapshots.get(mode)
+        curve = snapshots.get("curve", []) if snapshots else []
         if not (0 <= index < len(curve)):
             return
         item = curve[index]
@@ -1292,37 +1544,65 @@ class WorkbenchPage(QWidget):
                 text = str(value)
             return f"<b style='color:#1f695e'>{text}</b>"
 
-        parts = [
-            f"AICc {fmt('aicc', 1)}",
-            f"全局 R² {fmt('r2', 4)}",
-            f"局部 R² 中位数 {fmt('local_r2_median', 4)}",
-            f"残差 RMSE {fmt('residual_rmse', 3)}",
-        ]
-        best = self._best_bandwidth()
-        if best is not None:
-            parts.append(f"最佳带宽（AICc 最小）<b style='color:#e78338'>{best}</b>")
+        if mode == "raster":
+            parts = [
+                f"MAE {fmt('mae', 4)}",
+                f"RMSE {fmt('rmse', 4)}",
+                f"相关 {fmt('correlation', 4)}",
+                f"局部 R² 中位数 {fmt('local_r2_median', 4)}",
+                f"局部 MAE 中位数 {fmt('local_mae_median', 4)}",
+            ]
+            best = self._best_bandwidth()
+            if best is not None:
+                parts.append(f"推荐窗口（RMSE 最小）<b style='color:#e78338'>{best}</b>")
+        elif mode == "geometry":
+            parts = [
+                f"GW IoU 中位数 {fmt('gw_iou_median', 4)}",
+                f"GW 面积 MAE 中位数 {fmt('gw_area_mae_median', 4)}",
+                f"GW 质心距离中位数 {fmt('gw_centroid_median', 1)} m",
+                f"GW RMSE 中位数 {fmt('gw_rmse_median', 4)}",
+            ]
+            best = self._best_bandwidth()
+            if best is not None:
+                parts.append(f"推荐带宽（GW IoU 最高）<b style='color:#e78338'>{best}</b> m")
+        else:
+            parts = [
+                f"AICc {fmt('aicc', 1)}",
+                f"全局 R² {fmt('r2', 4)}",
+                f"局部 R² 中位数 {fmt('local_r2_median', 4)}",
+                f"残差 RMSE {fmt('residual_rmse', 3)}",
+            ]
+            best = self._best_bandwidth()
+            if best is not None:
+                parts.append(f"最佳带宽（AICc 最小）<b style='color:#e78338'>{best}</b>")
         self.bw_metrics_label.setText("　·　".join(parts))
 
     def _best_bandwidth(self):
-        curve = self._bandwidth_snapshots.get("curve", [])
-        best, best_aicc = None, None
+        mode = self._current_mode()
+        snapshots = self._bandwidth_snapshots.get(mode)
+        curve = snapshots.get("curve", []) if snapshots else []
+        key, higher_better = {
+            "attribute": ("aicc", False),
+            "raster": ("rmse", False),
+            "geometry": ("gw_iou_median", True),
+        }.get(mode, ("aicc", False))
+        best, best_value = None, None
         for item in curve:
-            aicc = item.get("aicc")
-            if aicc is None:
+            value = item.get(key)
+            if value is None:
                 continue
-            if best_aicc is None or aicc < best_aicc:
-                best_aicc = aicc
-                best = item.get("bandwidth")
+            if best_value is None or (value > best_value if higher_better else value < best_value):
+                best_value, best = value, item.get("bandwidth")
         return best
 
     def _update_bandwidth_legend(self, index):
         legend_layout = getattr(self, "bw_legend_layout", None)
         if legend_layout is None:
             return
-        field = self._current_map_field()
+        field = self._bw_field()
         self._colors_for(field)  # 确保配色/图例缓存已计算
         clear_layout(legend_layout)
-        entries = self._bandwidth_legend_cache.get(field, [])
+        entries = self._bandwidth_legend_cache.get((self._current_mode(), field), [])
         if not (0 <= index < len(entries)):
             return
         breaks, colors = entries[index]
@@ -1341,39 +1621,61 @@ class WorkbenchPage(QWidget):
             legend_layout.addWidget(label)
         legend_layout.addStretch()
 
-    def _current_map_field(self):
-        """把分层设色的「设色字段」映射到带宽探索的逐带宽字段；非结果字段默认回退显示局部 R²。"""
-        field = self.symbology_field_combo.currentText()
-        return _BANDWIDTH_FIELD_MAP.get(field, "local_r2")
+    def _bw_field(self):
+        """当前模式在带宽探索中着色的指标字段。"""
+        mode = self._current_mode()
+        if mode == "raster":
+            return "local_mae"
+        if mode == "geometry":
+            return "gw_iou"
+        return _BANDWIDTH_FIELD_MAP.get(self.symbology_field_combo.currentText(), "local_r2")
 
     def _colors_for(self, field):
         """返回某展示参数在每个带宽下的逐要素配色（惰性计算并缓存）。"""
-        if field not in self._bandwidth_color_cache:
-            raw = self._bandwidth_snapshots.get("raw", {}).get(field, [])
-            n_bands = len(self._bandwidth_snapshots.get("bandwidths", []))
+        mode = self._current_mode()
+        key = (mode, field)
+        if key not in self._bandwidth_color_cache:
+            snapshots = self._bandwidth_snapshots.get(mode)
+            raw = (snapshots or {}).get("raw", {}).get(field, [])
+            n_bands = len((snapshots or {}).get("bandwidths", []))
             if not raw:
-                self._bandwidth_color_cache[field] = [[]] * n_bands
-                self._bandwidth_legend_cache[field] = [([], [])] * n_bands
+                self._bandwidth_color_cache[key] = [[]] * n_bands
+                self._bandwidth_legend_cache[key] = [([], [])] * n_bands
+            elif mode == "raster":
+                entries = [self._build_raster_legend(vals) for vals in raw]
+                self._bandwidth_color_cache[key] = [entry[0] for entry in entries]
+                self._bandwidth_legend_cache[key] = [(entry[1], entry[2]) for entry in entries]
+            elif mode == "geometry":
+                entries = [self._build_geometry_colors(entry) for entry in raw]
+                self._bandwidth_color_cache[key] = [entry[0] for entry in entries]
+                self._bandwidth_legend_cache[key] = [(entry[1], entry[2]) for entry in entries]
             else:
                 entries = [self._build_feature_colors(vals) for vals in raw]
-                self._bandwidth_color_cache[field] = [entry[0] for entry in entries]
-                self._bandwidth_legend_cache[field] = [(entry[1], entry[2]) for entry in entries]
-        return self._bandwidth_color_cache[field]
+                self._bandwidth_color_cache[key] = [entry[0] for entry in entries]
+                self._bandwidth_legend_cache[key] = [(entry[1], entry[2]) for entry in entries]
+        return self._bandwidth_color_cache[key]
 
     def _on_bandwidth_field_changed(self, *_):
-        if not self._bandwidth_snapshots:
+        """设色字段 / 分级方法 / 分级数变化后，重算当前模式的带宽配色。"""
+        mode = self._current_mode()
+        if not self._bandwidth_snapshots.get(mode):
             return
-        field = self._current_map_field()
-        if not field:
-            return
-        self._colors_for(field)
-        index = self._bandwidth_index(self.bandwidth_slider.value())
+        self._clear_bandwidth_caches(mode)
+        index = self._bandwidth_index(self.bandwidth_slider.value(), mode)
         if index is not None:
             self._update_bandwidth_legend(index)
             self._set_bandwidth_map(index)
 
     def _set_bandwidth_map(self, index):
-        colors = self._colors_for(self._current_map_field())
+        mode = self._current_mode()
+        if mode == "raster":
+            # 栅格模式：直接切换地图底图为该窗口的局部 MAE 预览栅格
+            snapshots = self._bandwidth_snapshots.get(mode)
+            previews = (snapshots or {}).get("raw", {}).get("previews", [])
+            if index < len(previews) and previews[index]:
+                self.map_canvas.load_raster(previews[index])
+            return
+        colors = self._colors_for(self._bw_field())
         self.map_canvas.set_feature_colors(colors[index])
 
     def _build_feature_colors(self, values):
@@ -1390,6 +1692,40 @@ class WorkbenchPage(QWidget):
         for i, cls in enumerate(indices):
             if cls is not None and 0 <= cls < nc:
                 feature_colors[i] = QColor(colors[cls])
+        return feature_colors, breaks, colors
+
+    def _build_raster_legend(self, values):
+        """把一档窗口的局部指标（降采样网格值）分级，生成灰度图例（与地图灰度预览一致：高值更亮）。"""
+        method = self.symbology_method_combo.currentText()
+        n_classes = self.symbology_classes_spin.value()
+        manual = self._parse_manual_breaks() if method == "手动" else None
+        breaks, _indices = classify(values, method, n_classes, manual)
+        nc = len(breaks) - 1
+        if nc <= 0:
+            return None, [], []
+        colors = []
+        for i in range(nc):
+            tone = round(60 + 175 * i / max(nc - 1, 1))
+            colors.append(f"#{tone:02x}{tone:02x}{tone:02x}")
+        return None, breaks, colors
+
+    def _build_geometry_colors(self, entry):
+        """把一档带宽的 GW 面 IoU 按 source_id 对齐到地图要素，返回配色/图例。"""
+        source_ids = entry.get("source_ids") or []
+        values = entry.get("values") or []
+        method = self.symbology_method_combo.currentText()
+        n_classes = self.symbology_classes_spin.value()
+        manual = self._parse_manual_breaks() if method == "手动" else None
+        breaks, indices = classify(values, method, n_classes, manual)
+        nc = len(breaks) - 1
+        if nc <= 0:
+            return [], [], []
+        colors = auto_colors(values, nc)
+        n_features = len(getattr(self.map_canvas, "shapes", []))
+        feature_colors = [None] * n_features
+        for feature_id, cls in zip(source_ids, indices):
+            if cls is not None and 0 <= cls < nc and 0 <= feature_id < n_features:
+                feature_colors[feature_id] = QColor(colors[cls])
         return feature_colors, breaks, colors
 
     def update_result(self, result: AnalysisResult, shp_path=None):
