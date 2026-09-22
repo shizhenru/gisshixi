@@ -165,6 +165,7 @@ class WorkbenchPage(QWidget):
     """设置 GWR 模型参数并运行；分析视图与属性表视图两个页签可随时切换。"""
 
     runRequested = Signal(dict)
+    resultDirectoryRequested = Signal()
     statusMessage = Signal(str)
 
     def __init__(self, store, parent=None, rscript_path=""):
@@ -324,6 +325,10 @@ class WorkbenchPage(QWidget):
         chart_button.setObjectName("OutlineButton")
         chart_button.clicked.connect(self._open_chart_window)
         hint_row.addWidget(chart_button)
+        result_directory_button = QPushButton("结果目录")
+        result_directory_button.setObjectName("OutlineButton")
+        result_directory_button.clicked.connect(self.resultDirectoryRequested.emit)
+        hint_row.addWidget(result_directory_button)
         body.addLayout(hint_row)
         return panel
 

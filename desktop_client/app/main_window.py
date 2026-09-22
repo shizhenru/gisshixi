@@ -170,6 +170,7 @@ class SpatialValidationWindow(QMainWindow):
 
     def _connect_signals(self):
         self.workbench_page.runRequested.connect(self.run_analysis)
+        self.workbench_page.resultDirectoryRequested.connect(self._open_result_directory)
         self.data_panel.statusMessage.connect(self.set_status)
         self.data_page.statusMessage.connect(self.set_status)
         self.data_page.navigationRequested.connect(self.navigate)
@@ -203,6 +204,17 @@ class SpatialValidationWindow(QMainWindow):
     def set_status(self, message):
         self.status_label.setText(message)
         self.data_panel.refresh()
+
+    def _open_result_directory(self):
+        path = self.latest_result.output_dir
+        if not path or not Path(path).exists():
+            self.set_status("本次结果目录不存在")
+            return
+        try:
+            import os
+            os.startfile(path)
+        except OSError as exc:
+            self.set_status(f"无法打开结果目录：{exc}")
 
     def _set_rscript_path(self, path):
         self.settings.setValue("rscript_path", path)
