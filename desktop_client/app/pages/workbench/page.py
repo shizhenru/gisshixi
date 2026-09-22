@@ -33,7 +33,7 @@ from ...qt_compat import (
     Signal,
     Slot,
 )
-from ...widgets import BandwidthCurveCanvas, ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
+from ...widgets import ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
 from core.algorithms.python_runner import PythonRunner
 from core.algorithms.r_runner import RRunner
 from core.io.readers import read_attributes, read_unique_values
@@ -321,11 +321,6 @@ class WorkbenchPage(QWidget):
         self.bw_sequence_hint.setObjectName("Muted")
         step_row.addWidget(self.bw_sequence_hint, 1)
         body.addLayout(step_row)
-
-        # 带宽—指标曲线
-        self.bw_curve = BandwidthCurveCanvas()
-        self.bw_curve.setFixedHeight(140)
-        body.addWidget(self.bw_curve)
 
         # 当前带宽关键指标 + 最佳带宽
         self.bw_metrics_label = QLabel("拖动滑块自动生成并查看地图变化")
@@ -1272,9 +1267,6 @@ class WorkbenchPage(QWidget):
         self._bandwidth_color_cache = {}
         self._bandwidth_legend_cache = {}
         self._bandwidth_generating = False
-        curve = getattr(self, "bw_curve", None)
-        if curve is not None:
-            curve.clear()
         metrics = getattr(self, "bw_metrics_label", None)
         if metrics is not None:
             metrics.setText("生成带宽快照后显示各带宽指标")
@@ -1308,7 +1300,6 @@ class WorkbenchPage(QWidget):
         self._refresh_bandwidth_sequence_hint()
         self._bandwidth_snapshots.pop(mode, None)
         self._clear_bandwidth_caches(mode)
-        self._refresh_bandwidth_curve(mode)
         metrics = getattr(self, "bw_metrics_label", None)
         if metrics is not None:
             metrics.setText("生成带宽快照后显示各带宽指标")
@@ -1466,27 +1457,9 @@ class WorkbenchPage(QWidget):
             return
         self._bandwidth_snapshots[mode] = {"mode": mode, "bandwidths": bandwidths, "curve": curve, "raw": raw}
         self._clear_bandwidth_caches(mode)
-        self._refresh_bandwidth_curve(mode)
         self._on_bandwidth_slider_changed(self.bandwidth_slider.value(), auto_generate=False)
         self.bw_status.setText(f"已生成 {len(bandwidths)} 个带宽快照，拖动滑块查看地图变化")
         self.statusMessage.emit(result.get("message", "带宽快照已生成"))
-
-    def _refresh_bandwidth_curve(self, mode):
-        """把快照曲线喂给折线图控件；纵轴指标随模式取最常用的一个。"""
-        curve_widget = getattr(self, "bw_curve", None)
-        if curve_widget is None:
-            return
-        snapshots = self._bandwidth_snapshots.get(mode)
-        if not snapshots:
-            curve_widget.clear()
-            return
-        metric, name = {
-            "attribute": ("aicc", "AICc（越小越好）"),
-            "raster": ("rmse", "全局 RMSE（越小越好）"),
-            "geometry": ("gw_iou_median", "GW 面 IoU 中位数（越大越好）"),
-        }.get(mode, ("aicc", "AICc（越小越好）"))
-        points = [(item.get("bandwidth"), item.get(metric)) for item in snapshots.get("curve", [])]
-        curve_widget.set_data(points, name)
 
     def _on_bandwidth_slider_changed(self, value, auto_generate=True):
         mode = self._current_mode()
@@ -1508,9 +1481,6 @@ class WorkbenchPage(QWidget):
         self._update_metric_line(index)
         self._update_bandwidth_legend(index)
         self._set_bandwidth_map(index)
-        curve_widget = getattr(self, "bw_curve", None)
-        if curve_widget is not None:
-            curve_widget.set_current_index(index)
 
     def _bandwidth_index(self, value, mode=None):
         mode = mode or self._current_mode()

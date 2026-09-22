@@ -52,6 +52,8 @@ class MapCanvas(QWidget):
         self._raster_loading = False
         self._raster_error = ""
         self._raster_seq = 0
+        self._vector_image = QImage()
+        self._vector_cache_scale = 0.0
 
     def load_shapes(self, geometry_data: dict):
         """加载真实几何数据用于渲染（shapefile 等）。"""
@@ -62,6 +64,8 @@ class MapCanvas(QWidget):
         self._raster_image = QImage()
         self._raster_loading = False
         self._raster_error = ""
+        self._vector_image = QImage()
+        self._vector_cache_scale = 0.0
         self._build_cache()
         self._view_init = False
         self.update()
@@ -76,6 +80,8 @@ class MapCanvas(QWidget):
         self._feature_fills = []
         self._highlight_index = None
         self._raster_image = QImage()
+        self._vector_image = QImage()
+        self._vector_cache_scale = 0.0
         self._raster_loading = True
         self._raster_error = ""
         self.data_bbox = None
@@ -123,6 +129,8 @@ class MapCanvas(QWidget):
         self._feature_fills = []
         self._highlight_index = None
         self._raster_image = QImage()
+        self._vector_image = QImage()
+        self._vector_cache_scale = 0.0
         self._raster_loading = False
         self._raster_error = ""
         self._view_init = False
@@ -131,6 +139,8 @@ class MapCanvas(QWidget):
     def set_feature_colors(self, colors):
         """设置每个要素的填充色（与 self.shapes 对齐，元素为 QColor 或 None）。"""
         self._feature_fills = list(colors) if colors else []
+        self._vector_image = QImage()
+        self._vector_cache_scale = 0.0
         self.update()
 
     def highlight_feature(self, index):
@@ -204,6 +214,64 @@ class MapCanvas(QWidget):
                 return None
         return None
 
+    def _render_vector_cache(self):
+        """把矢量图层一次性光栅化为世界坐标 QImage，paint 时只贴图。
+
+        大图层（数万要素）逐要素重绘代价高；光栅化后平移 / 小幅缩放只做一次
+        drawImage，仅当放大超过缓存分辨率 2 倍时才按更高分辨率重绘。
+        """
+        self._vector_image = QImage()
+        self._vector_cache_scale = 0.0
+        if not self.data_bbox or not (self._polygons or self._polylines or self._points):
+            return
+        xmin, ymin, xmax, ymax = self.data_bbox
+        world_w = xmax - xmin
+        world_h = ymax - ymin
+        if world_w <= 0 or world_h <= 0:
+            return
+        # 分辨率以当前视图比例为准，长边最多 6000 像素，避免深缩放生成超大图。
+        scale = self._scale
+        max_scale = 6000 / max(world_w, world_h)
+        if scale > max_scale:
+            scale = max_scale
+        if scale <= 0:
+            return
+        img_w = max(1, int(round(world_w * scale)))
+        img_h = max(1, int(round(world_h * scale)))
+        image = QImage(img_w, img_h, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # world -> image（y 翻转）：xmin→0、ymax→0
+        painter.setTransform(QTransform(scale, 0, 0, -scale, -xmin * scale, ymax * scale))
+
+        outline = QPen(QColor("#2d8c7c"))
+        outline.setCosmetic(True)
+        default_fill = QColor("#b0d5cc")
+        for i, poly in enumerate(self._polygons):
+            fid = self._polygon_feature_ids[i] if i < len(self._polygon_feature_ids) else -1
+            color = default_fill
+            if self._feature_fills and 0 <= fid < len(self._feature_fills):
+                color = self._feature_fills[fid] or default_fill
+            painter.setPen(outline)
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(poly)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        line_pen = QPen(QColor("#e78338"))
+        line_pen.setCosmetic(True)
+        line_pen.setWidth(2)
+        painter.setPen(line_pen)
+        for line in self._polylines:
+            painter.drawPolyline(line)
+        painter.setPen(QPen(QColor("#d86659"), 1))
+        painter.setBrush(QBrush(QColor("#d86659")))
+        for point in self._points:
+            painter.drawEllipse(point, 4, 4)
+        painter.end()
+
+        self._vector_image = image
+        self._vector_cache_scale = scale
+
     def _paint_data(self, painter, rect):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(QPen(QColor("#dce9e4"), 1))
@@ -219,40 +287,31 @@ class MapCanvas(QWidget):
         # world -> screen：先缩放（y 翻转），再平移。用 QTransform 一次性完成。
         transform = QTransform(scale, 0, 0, -scale, cx - self._center_x * scale, cy + self._center_y * scale)
 
-        painter.save()
-        painter.setTransform(transform)
-        outline = QPen(QColor("#2d8c7c"))
-        outline.setCosmetic(True)
-        default_fill = QColor("#b0d5cc")
-        for i, poly in enumerate(self._polygons):
-            fid = self._polygon_feature_ids[i] if i < len(self._polygon_feature_ids) else -1
-            if self._highlight_index is not None and fid == self._highlight_index:
-                hl = QPen(QColor("#f5a623"))
-                hl.setCosmetic(True)
-                hl.setWidthF(2.5)
-                painter.setPen(hl)
-                painter.setBrush(QBrush(QColor("#f5d08a")))
-            else:
-                painter.setPen(outline)
-                color = default_fill
-                if self._feature_fills and 0 <= fid < len(self._feature_fills):
-                    color = self._feature_fills[fid] or default_fill
-                painter.setBrush(QBrush(color))
-            painter.drawPolygon(poly)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        line_pen = QPen(QColor("#e78338"))
-        line_pen.setCosmetic(True)
-        line_pen.setWidth(2)
-        painter.setPen(line_pen)
-        for line in self._polylines:
-            painter.drawPolyline(line)
-        painter.restore()
+        # 光栅化缓存失效（未渲染 / 颜色变化 / 放大超过 2 倍）时重绘，否则直接贴图。
+        if self._vector_image.isNull() or self._vector_cache_scale <= 0 or scale > self._vector_cache_scale * 2.0:
+            self._render_vector_cache()
 
-        painter.setPen(QPen(QColor("#d86659"), 1))
-        painter.setBrush(QBrush(QColor("#d86659")))
-        for point in self._points:
-            sp = transform.map(point)
-            painter.drawEllipse(sp, 4, 4)
+        if not self._vector_image.isNull():
+            xmin, ymin, xmax, ymax = self.data_bbox
+            top_left = transform.map(QPointF(xmin, ymax))
+            bottom_right = transform.map(QPointF(xmax, ymin))
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(QRectF(top_left, bottom_right), self._vector_image)
+
+        # 高亮要素叠加绘制：不重绘整层，只画命中要素。
+        if self._highlight_index is not None:
+            painter.save()
+            painter.setTransform(transform)
+            hl = QPen(QColor("#f5a623"))
+            hl.setCosmetic(True)
+            hl.setWidthF(2.5)
+            painter.setPen(hl)
+            painter.setBrush(QBrush(QColor("#f5d08a")))
+            for i, poly in enumerate(self._polygons):
+                fid = self._polygon_feature_ids[i] if i < len(self._polygon_feature_ids) else -1
+                if fid == self._highlight_index:
+                    painter.drawPolygon(poly)
+            painter.restore()
 
     def paintEvent(self, event):
         del event
