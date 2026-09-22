@@ -487,15 +487,90 @@ def inspect_shapefile(path: str | Path) -> dict[str, Any]:
 
 
 def read_unique_values(path: str | Path, field: str, limit: int = 500) -> list[str]:
-    """Read distinct non-null attribute values without loading geometry."""
+    """读取某字段的去重取值（不读几何），供几何交叉验证的类别映射使用。
+
+    走标准库解析，不依赖 pyogrio：pyogrio 是可选依赖，缺失时原先的实现会静默返回空表，
+    界面上的类别映射因此一行都不显示。pyogrio 仅作为兜底（如 GeoPackage）。
+    """
+    file_path = Path(path)
+    if file_path.suffix.lower() == ".shp":
+        values = _dbf_unique_values(file_path, field, limit)
+        if values:
+            return values
+
+    data = read_attributes(str(file_path), limit=0)
+    if field in data["fields"]:
+        index = data["fields"].index(field)
+        return _dedupe_text(row[index] for row in data["rows"] if index < len(row))[:limit]
+
     try:
         import pyogrio
-        frame = pyogrio.read_dataframe(path, columns=[field], read_geometry=False)
+        frame = pyogrio.read_dataframe(str(file_path), columns=[field], read_geometry=False)
         if field not in frame.columns:
             return []
         return frame[field].dropna().astype(str).drop_duplicates().tolist()[:limit]
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - 兜底路径失败仍按空表处理
         return []
+
+
+def _dedupe_text(values) -> list[str]:
+    """按出现顺序去重并转成文本，缺失值跳过。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def _dbf_unique_values(shp_path: Path, field: str, limit: int) -> list[str]:
+    """只扫描指定字段列取去重值：解析整张属性表在十几万行数据上要慢一个量级。"""
+    dbf = shp_path.with_suffix(".dbf")
+    if not dbf.exists():
+        return []
+    raw = dbf.read_bytes()
+    if len(raw) < 33:
+        return []
+    total = struct.unpack_from("<i", raw, 4)[0]
+    header_size = struct.unpack_from("<H", raw, 8)[0]
+    record_size = struct.unpack_from("<H", raw, 10)[0]
+
+    offset, start = 32, 0
+    target = None
+    while offset + 32 <= header_size and raw[offset] != 0x0D:
+        name = raw[offset:offset + 11].split(b"\x00")[0].decode("ascii", "replace").strip()
+        flen = raw[offset + 16]
+        if name == field:
+            target = (start, chr(raw[offset + 11]), flen, raw[offset + 17])
+            break
+        start += flen
+        offset += 32
+    if target is None:
+        return []
+
+    start, ftype, flen, fdec = target
+    encoding = _dbf_encoding(dbf, raw)
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in range(total):
+        rec_start = header_size + r * record_size
+        if rec_start + record_size > len(raw):
+            break
+        seg = raw[rec_start + 1 + start: rec_start + 1 + start + flen]
+        value = _parse_dbf_value(seg, ftype, fdec, encoding)
+        if value is None:
+            continue
+        text = str(value)
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+            if limit and len(out) >= limit:
+                break
+    return out
 
 
 def _read_dbf(shp_path: Path) -> tuple[list[str], int]:

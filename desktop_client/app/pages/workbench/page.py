@@ -1,11 +1,16 @@
 """工作台页：模型参数设置 + 运行 + 结果地图/散点图 + 属性表。"""
+import math
 import shutil
+import struct
 from pathlib import Path
 
 from ...qt_compat import (
+    QAbstractItemView,
     QCheckBox,
     QColor,
     QComboBox,
+    QItemSelection,
+    QItemSelectionModel,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -33,13 +38,23 @@ from ...qt_compat import (
     Signal,
     Slot,
 )
-from ...widgets import ChartWindow, DroppableTable, MapCanvas, ScatterCanvas, clear_layout, fill_table, panel_box
+from ...widgets import (
+    AttributeTableModel,
+    ChartWindow,
+    DroppableTableView,
+    MapCanvas,
+    ScatterCanvas,
+    clear_layout,
+    columns_from_rows,
+    panel_box,
+)
+from ...widgets.vector_loader import VectorLoadWorker
 from core.algorithms.python_runner import PythonRunner
 from core.algorithms.r_runner import RRunner
 from core.io.readers import read_attributes, read_unique_values
 from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
 from core.raster_processing import RasterPreprocessor
-from core.symbology import FIELD_INFO, auto_colors, classify
+from core.symbology import FIELD_INFO, auto_colors, categorical_colors, classify, classify_unique
 
 
 class InfoIcon(QLabel):
@@ -75,6 +90,21 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+# 小地图与属性表共同的最大要素数。栅格转面数据常有十几万要素，全量渲染一次性阻塞
+# 主线程约 2.4 秒（建 QPointF 缓存 ~1.5s + 光栅化 ~0.9s），可以接受；仍留上限兜底极端数据。
+# 属性表按同一上限读取并逐行展示，保证表行与地图要素严格一一对应，联动高亮不会错位。
+_MAP_MAX_RECORDS = 200000
+
+# 分层设色图例最多列出的类别数：面板不滚动，唯一值可能有几十类。
+_LEGEND_MAX_ITEMS = 30
+
+# 统一的控件高度与间距标尺：同一界面里混用 30/32 高、5/6/7/8/10 间距会显得零碎
+_CONTROL_HEIGHT = 32
+_GAP_TIGHT = 4    # 标签与紧邻控件
+_GAP_ITEM = 6     # 组内控件之间
+_GAP_GROUP = 10   # 面板内分组之间
+_GAP_PANEL = 12   # 面板之间
+
 # 分层设色字段名 → 带宽探索逐带宽结果字段（与 gwr_attribute.R 写出的结果 SHP 字段对齐）
 _BANDWIDTH_FIELD_MAP = {
     "Local_R2": "local_r2",
@@ -86,19 +116,29 @@ _BANDWIDTH_FIELD_MAP = {
     "LRMSE": "lrmse",
 }
 
-# 带宽区间：各分析模式的取值区间 / 默认值 / 步长 / 单位
+# 带宽区间统一用百分比表示：绝对范围写死会在十几万要素的数据上失效——属性模式固定
+# 1~100 个近邻，而这类数据合适的带宽可能是几千到几万。滑块与步长都走百分比，
+# 实际带宽按各模式的数据基准换算（见 _bandwidth_baseline），并实时显示换算结果。
+_BANDWIDTH_PERCENT = {"lo": 5, "hi": 100, "default": 50}
+_BANDWIDTH_STEP_RANGE = (1, 50)   # 百分比步长
+_BANDWIDTH_STEP_DEFAULT = 5
+
+# 栅格模式的窗口上限（像素）：短路取栅格短边会让窗口跑到几万像素，
+# 在几万宽的栅格上做这种尺寸的移动窗口既无意义也慢到跑不完。
+_RASTER_WINDOW_MAX = 999
+
+# 各模式的单位与说明；基准值随数据而定，不写死
 _BANDWIDTH_MODES = {
-    "attribute": {"lo": 1, "hi": 100, "default": 50, "step": 1, "unit": "近邻", "hint": "复用 Y / X / 核函数"},
-    "raster": {"lo": 3, "hi": 99, "default": 5, "step": 2, "unit": "窗口", "hint": "复用栅格选择 / 重采样 / 零值阈值"},
-    "geometry": {"lo": 500, "hi": 10000, "default": 5000, "step": 500, "unit": "米", "hint": "复用类别映射 / 推荐 IoU 阈值"},
+    "attribute": {"unit": "近邻", "hint": "复用数据 1 / 数据 2 / 核函数"},
+    "raster": {"unit": "窗口", "hint": "复用栅格选择 / 重采样 / 零值阈值"},
+    "geometry": {"unit": "米", "hint": "复用类别映射 / 推荐 IoU 阈值"},
 }
 
-# 步长控件在各模式的取值范围（保证序列落在滑块区间内；栅格步长取偶数时窗口保持奇数）
-_BANDWIDTH_STEP_RANGES = {
-    "attribute": (1, 50),
-    "raster": (2, 96),
-    "geometry": (100, 5000),
-}
+# 属性模式 GWR 的重投影目标（与 gwr_attribute.R 的 PROJ_CRS 保持一致，用于估算研究区范围）
+_ATTRIBUTE_PROJ_CRS = (
+    "+proj=aea +lat_1=25 +lat_2=47 +lat_0=0 +lon_0=105 +x_0=0 +y_0=0 "
+    "+datum=WGS84 +units=m +no_defs"
+)
 
 
 class _BandwidthWorker(QObject):
@@ -148,8 +188,11 @@ class WorkbenchPage(QWidget):
         self._bandwidth_legend_cache = {}  # (mode, field) -> 每档带宽的 (breaks, colors)
         self._bandwidth_generating = False
         self._bandwidth_generating_mode = ""
-        self._bw_slider_values = {}  # mode -> 最近一次滑块值
-        self._bw_step_values = {}    # mode -> 最近一次步长
+        self._bw_slider_values = {}  # mode -> 最近一次滑块百分比
+        self._bw_step_values = {}    # mode -> 最近一次百分比步长
+        self._bw_baseline_cache = {}  # 数据基准缓存（栅格尺寸等）
+        self._bw_count_cache = {}     # (路径, X, Y) -> 有效样本数
+        self._bw_extent_cache = {}    # (路径, 目标投影) -> 范围对角线（米）
         self._bandwidth_thread = None
         self._bandwidth_worker = None
         self.latest_result = AnalysisResult()
@@ -158,10 +201,16 @@ class WorkbenchPage(QWidget):
         self.result_table = None
         self.save_shp_button = None
         self._result_output_shp = ""
+        self._syncing_selection = False   # 防止地图 ↔ 属性表互相触发造成回环
+        self._table_linked = False        # 属性表行序是否与地图要素一一对应
         self._map_path = None
         self._map_geometry = None
         self._map_fields = []
         self._map_values = {}
+        self._vector_load_seq = 0      # 矢量加载请求序号，用于丢弃过期结果
+        self._pending_reset_xy = True
+        self._pending_fill_table = True
+        self._vector_loads = {}        # seq -> (线程, worker)，持有引用防止在飞任务被 GC
         self.field_info_label = None
         self._chart_window = None
         self.raster_list = None
@@ -200,14 +249,14 @@ class WorkbenchPage(QWidget):
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(_GAP_PANEL)
 
         top = QHBoxLayout()
-        top.setSpacing(12)
+        top.setSpacing(_GAP_PANEL)
 
         # 右：模型参数（滚动条）+ 分层设色（先构建，带宽面板依赖 symbology_field_combo）
         right = QVBoxLayout()
-        right.setSpacing(12)
+        right.setSpacing(_GAP_PANEL)
         right.addWidget(self._parameter_panel(), 1)
         right.addWidget(self._symbology_panel())
         right_widget = QWidget()
@@ -216,7 +265,7 @@ class WorkbenchPage(QWidget):
 
         # 左：地图 + 带宽区间（带宽区间在地图下方，不占整行宽度）
         left = QVBoxLayout()
-        left.setSpacing(12)
+        left.setSpacing(_GAP_PANEL)
         left.addWidget(self._map_panel(), 1)
         self.bandwidth_panel = self._bandwidth_panel()
         left.addWidget(self.bandwidth_panel)
@@ -231,7 +280,7 @@ class WorkbenchPage(QWidget):
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(_GAP_GROUP)
 
         header = QHBoxLayout()
         self.attr_hint = QLabel("拖动左侧数据到此处，查看对应属性表")
@@ -243,15 +292,25 @@ class WorkbenchPage(QWidget):
         header.addWidget(self.save_shp_button)
         layout.addLayout(header)
 
-        self.result_table = DroppableTable(0, 0)
+        # 用虚拟表（QTableView + 模型）而非 QTableWidget：十几万行也能秒开且几乎不占内存
+        self.attr_model = AttributeTableModel(self)
+        self.result_table = DroppableTableView()
+        self.result_table.setModel(self.attr_model)
         self.result_table.verticalHeader().setVisible(False)
         self.result_table.setAlternatingRowColors(True)
+        # 行序必须与地图要素一一对应才能联动高亮，故不排序；按行多选，选中几行地图就亮几块。
+        self.result_table.setSortingEnabled(False)
+        self.result_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.result_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.result_table.selectionModel().selectionChanged.connect(self._on_table_selection_changed)
         self.result_table.sourceDropped.connect(self._load_source_table)
         layout.addWidget(self.result_table, 1)
         return container
 
     def _map_panel(self):
-        panel, body = panel_box("RESULT MAP", "小地图", "局部 R²")
+        panel, body = panel_box("RESULT MAP", "小地图", "尚未设色")
+        # 标题右侧的注释跟随当前设色字段，避免写死一个字段名后与实际不符
+        self.map_note = panel.findChild(QLabel, "PanelNote")
         self.map_canvas = MapCanvas()
         self.map_canvas.sourceDropped.connect(self.load_shp)
         self.map_canvas.featureClicked.connect(self._on_map_feature_clicked)
@@ -269,34 +328,45 @@ class WorkbenchPage(QWidget):
         return panel
 
     def _bandwidth_panel(self):
-        panel, body = panel_box("BANDWIDTH", "带宽区间", "拖动滑块 · 自动生成")
-        body.setSpacing(7)
+        # compact=True：这块在地图下方，压紧一点给地图让出高度
+        panel, body = panel_box("BANDWIDTH", "带宽区间", "拖动滑块 · 自动生成", compact=True)
 
-        # 模式说明（随「属性 / 栅格 / 几何」页签切换）
+        # 模式说明 + 状态合并成一行（随「属性 / 栅格 / 几何」页签切换）
+        info_row = QHBoxLayout()
+        info_row.setSpacing(10)
         self.bw_mode_hint = QLabel("")
         self.bw_mode_hint.setObjectName("Muted")
-        self.bw_mode_hint.setWordWrap(True)
-        body.addWidget(self.bw_mode_hint)
+        info_row.addWidget(self.bw_mode_hint, 1)
+        self.bw_status = QLabel("")
+        self.bw_status.setObjectName("Muted")
+        self.bw_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        info_row.addWidget(self.bw_status)
+        body.addLayout(info_row)
 
         # 滑块 + 当前值 + 生成按钮
         row = QHBoxLayout()
-        self.bw_lo_label = QLabel("1")
+        self.bw_lo_label = QLabel(f"{_BANDWIDTH_PERCENT['lo']}%")
         self.bw_lo_label.setObjectName("Muted")
         row.addWidget(self.bw_lo_label)
         self.bandwidth_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bandwidth_slider.setRange(1, 100)
-        self.bandwidth_slider.setSingleStep(1)
-        self.bandwidth_slider.setPageStep(10)
-        self.bandwidth_slider.setValue(50)
+        self.bandwidth_slider.setRange(_BANDWIDTH_PERCENT["lo"], _BANDWIDTH_PERCENT["hi"])
+        self.bandwidth_slider.setSingleStep(_BANDWIDTH_STEP_DEFAULT)
+        self.bandwidth_slider.setPageStep(_BANDWIDTH_STEP_DEFAULT * 2)
+        self.bandwidth_slider.setValue(_BANDWIDTH_PERCENT["default"])
         row.addWidget(self.bandwidth_slider, 1)
-        self.bw_hi_label = QLabel("100")
+        self.bw_hi_label = QLabel(f"{_BANDWIDTH_PERCENT['hi']}%")
         self.bw_hi_label.setObjectName("Muted")
         row.addWidget(self.bw_hi_label)
-        self.bandwidth_value = QLabel("50")
-        self.bandwidth_value.setStyleSheet("color: #2d8c7c; font-weight: 700;")
-        self.bandwidth_value.setMinimumWidth(26)
+        self.bandwidth_value = QLabel("50%")
+        self.bandwidth_value.setObjectName("Muted")
+        self.bandwidth_value.setMinimumWidth(38)
         self.bandwidth_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self.bandwidth_value)
+        # 百分比换算成实际带宽后紧挨着显示，避免只看到比例不知道具体值
+        self.bw_converted = QLabel("—")
+        self.bw_converted.setStyleSheet("color: #2d8c7c; font-weight: 700;")
+        self.bw_converted.setMinimumWidth(150)
+        row.addWidget(self.bw_converted)
         self.generate_button = QPushButton("生成快照")
         self.generate_button.setObjectName("PrimaryButton")
         row.addWidget(self.generate_button)
@@ -304,17 +374,17 @@ class WorkbenchPage(QWidget):
 
         # 步长（真正作用于带宽序列生成与滑块步进）
         step_row = QHBoxLayout()
-        step_row.setSpacing(6)
+        step_row.setSpacing(_GAP_ITEM)
         step_label = QLabel("步长")
-        step_label.setObjectName("Muted")
+        step_label.setObjectName("FieldLabel")
         step_row.addWidget(step_label)
         self.bandwidth_step_spin = QSpinBox()
-        self.bandwidth_step_spin.setRange(1, 50)
-        self.bandwidth_step_spin.setValue(1)
-        self.bandwidth_step_spin.setFixedHeight(30)
+        self.bandwidth_step_spin.setRange(*_BANDWIDTH_STEP_RANGE)
+        self.bandwidth_step_spin.setValue(_BANDWIDTH_STEP_DEFAULT)
+        self.bandwidth_step_spin.setFixedHeight(_CONTROL_HEIGHT)
         self.bandwidth_step_spin.setFixedWidth(76)
         step_row.addWidget(self.bandwidth_step_spin)
-        self.bw_step_unit = QLabel("近邻")
+        self.bw_step_unit = QLabel("%")
         self.bw_step_unit.setObjectName("Muted")
         step_row.addWidget(self.bw_step_unit)
         self.bw_sequence_hint = QLabel("")
@@ -334,61 +404,57 @@ class WorkbenchPage(QWidget):
         self.bw_legend_layout.setSpacing(10)
         body.addLayout(self.bw_legend_layout)
 
-        # 状态
-        self.bw_status = QLabel("")
-        self.bw_status.setObjectName("Muted")
-        self.bw_status.setWordWrap(True)
-        body.addWidget(self.bw_status)
-
         self.bandwidth_slider.valueChanged.connect(self._on_bandwidth_slider_changed)
         self.bandwidth_step_spin.valueChanged.connect(self._on_bandwidth_step_changed)
         self.symbology_field_combo.currentTextChanged.connect(self._on_bandwidth_field_changed)
         self.symbology_method_combo.currentTextChanged.connect(self._on_bandwidth_field_changed)
         self.symbology_classes_spin.valueChanged.connect(self._on_bandwidth_field_changed)
         self.generate_button.clicked.connect(self._run_bandwidth_snapshots)
+        # 「带宽含义」在参数页签里，切换后 100% 的基准不同（样本数 / 研究区范围），需重算
+        self.bandwidth_mode_combo.currentTextChanged.connect(self._on_bandwidth_meaning_changed)
         # 面板构建晚于参数页签，这里补一次模式配置（参数页签构建时面板还不存在）
         self._apply_bandwidth_mode(self._current_mode())
         return panel
 
     def _symbology_panel(self):
         panel, body = panel_box("SYMBOLOGY", "分层设色", "分级渲染")
-        body.setSpacing(6)
+        body.setSpacing(_GAP_ITEM)
 
         # 设色字段：标签 + 问号 + 下拉框（一行）
         field_row = QHBoxLayout()
-        field_row.setSpacing(6)
+        field_row.setSpacing(_GAP_ITEM)
         label = QLabel("设色字段")
-        label.setObjectName("Muted")
+        label.setObjectName("FieldLabel")
         field_row.addWidget(label)
         self.field_info_label = InfoIcon()
         self.field_info_label.set_info("鼠标悬停查看设色字段含义与分级配色说明")
         field_row.addWidget(self.field_info_label)
         self.symbology_field_combo = QComboBox()
-        self.symbology_field_combo.setFixedHeight(32)
+        self.symbology_field_combo.setFixedHeight(_CONTROL_HEIGHT)
         self._style_combo(self.symbology_field_combo)
         field_row.addWidget(self.symbology_field_combo, 1)
         body.addLayout(field_row)
 
         # 分类方法 + 分级数（一行）
         method_row = QHBoxLayout()
-        method_row.setSpacing(6)
+        method_row.setSpacing(_GAP_ITEM)
         method_label = QLabel("方法")
-        method_label.setObjectName("Muted")
+        method_label.setObjectName("FieldLabel")
         method_row.addWidget(method_label)
         self.symbology_method_combo = NoWheelComboBox()
-        self.symbology_method_combo.addItems(["自然间断点", "等间隔", "分位数", "手动"])
-        self.symbology_method_combo.setFixedHeight(32)
+        self.symbology_method_combo.addItems(["自然间断点", "等间隔", "分位数", "唯一值", "手动"])
+        self.symbology_method_combo.setFixedHeight(_CONTROL_HEIGHT)
         self.symbology_method_combo.setFixedWidth(128)
         self._style_combo(self.symbology_method_combo)
         method_row.addWidget(self.symbology_method_combo)
         method_row.addStretch(1)
         class_label = QLabel("分级数")
-        class_label.setObjectName("Muted")
+        class_label.setObjectName("FieldLabel")
         method_row.addWidget(class_label)
         self.symbology_classes_spin = QSpinBox()
         self.symbology_classes_spin.setRange(2, 10)
         self.symbology_classes_spin.setValue(5)
-        self.symbology_classes_spin.setFixedHeight(32)
+        self.symbology_classes_spin.setFixedHeight(_CONTROL_HEIGHT)
         self.symbology_classes_spin.setFixedWidth(72)
         method_row.addWidget(self.symbology_classes_spin)
         body.addLayout(method_row)
@@ -414,7 +480,7 @@ class WorkbenchPage(QWidget):
 
     def _parameter_panel(self):
         panel, body = panel_box("GWR MODEL", "模型参数")
-        body.setSpacing(10)
+        body.setSpacing(_GAP_GROUP)
 
         self.param_tabs = QTabWidget()
         self.param_tabs.setMinimumHeight(210)
@@ -435,8 +501,6 @@ class WorkbenchPage(QWidget):
         self.save_result_shp.setChecked(True)
         body.addWidget(self.save_result_shp)
         self._refresh_variable_options()
-        self.bandwidth_mode_combo.currentTextChanged.connect(self._update_bandwidth_unit)
-        self._update_bandwidth_unit()
 
         # 运行按钮固定在滚动区外，始终可见
         run_button = QPushButton("▶ 运行")
@@ -459,22 +523,17 @@ class WorkbenchPage(QWidget):
         widget.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        self.y_combo = self._add_select(layout, "因变量 Y")
-        self.x_combo = self._add_select(layout, "自变量 X")
+        layout.setSpacing(_GAP_GROUP)
+        self.y_combo = self._add_select(layout, "数据 1")
+        self.x_combo = self._add_select(layout, "数据 2")
         self.kernel_combo = self._add_select(layout, "核函数", ["双平方核", "高斯核", "指数核"])
 
-        label = QLabel("带宽")
-        label.setObjectName("Muted")
-        layout.addWidget(label)
+        self._add_field_label(layout, "带宽")
         bw_row = QHBoxLayout()
         self.bandwidth_input = QLineEdit("25")
         self.bandwidth_input.setFixedWidth(80)
-        self.bandwidth_input.setFixedHeight(32)
-        self.bw_unit = QLabel("近邻")
-        self.bw_unit.setObjectName("Muted")
+        self.bandwidth_input.setFixedHeight(_CONTROL_HEIGHT)
         bw_row.addWidget(self.bandwidth_input)
-        bw_row.addWidget(self.bw_unit)
         self.auto_bandwidth = QCheckBox("自动（AIC）")
         bw_row.addWidget(self.auto_bandwidth)
         bw_row.addStretch()
@@ -493,26 +552,26 @@ class WorkbenchPage(QWidget):
         widget = QWidget()
         widget.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(QLabel("分析栅格（至少选择两个）"), 0, Qt.AlignmentFlag.AlignLeft)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(_GAP_GROUP)
+        self._add_field_label(layout, "分析栅格（至少选择两个）")
         self.raster_list = QListWidget()
         self.raster_list.setMinimumHeight(130)
         self.raster_list.setMaximumHeight(220)
         layout.addWidget(self.raster_list)
-        layout.addWidget(QLabel("局部窗口大小"), 0, Qt.AlignmentFlag.AlignLeft)
+        self._add_field_label(layout, "局部窗口大小")
         self.raster_window_spin = QSpinBox()
         self.raster_window_spin.setRange(3, 99)
         self.raster_window_spin.setSingleStep(2)
         self.raster_window_spin.setValue(5)
         layout.addWidget(self.raster_window_spin)
-        layout.addWidget(QLabel("重采样方法"), 0, Qt.AlignmentFlag.AlignLeft)
+        self._add_field_label(layout, "重采样方法")
         self.raster_resampling_combo = NoWheelComboBox()
         self.raster_resampling_combo.addItems(["bilinear", "near", "cubic"])
-        self.raster_resampling_combo.setFixedHeight(32)
+        self.raster_resampling_combo.setFixedHeight(_CONTROL_HEIGHT)
         self._style_combo(self.raster_resampling_combo)
         layout.addWidget(self.raster_resampling_combo)
-        layout.addWidget(QLabel("相对误差零值阈值"), 0, Qt.AlignmentFlag.AlignLeft)
+        self._add_field_label(layout, "相对误差零值阈值")
         self.raster_epsilon_spin = QDoubleSpinBox()
         self.raster_epsilon_spin.setDecimals(12)
         self.raster_epsilon_spin.setRange(0.0, 1.0)
@@ -537,8 +596,8 @@ class WorkbenchPage(QWidget):
         widget = QWidget()
         widget.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(_GAP_GROUP)
         self.geometry_a_combo = self._add_select(layout, "几何数据 A")
         self.geometry_b_combo = self._add_select(layout, "几何数据 B")
         self.geometry_a_field_combo = self._add_select(layout, "A 类别字段")
@@ -557,24 +616,24 @@ class WorkbenchPage(QWidget):
         self.geometry_mapping_table.setColumnWidth(3, 105)
         layout.addWidget(self.geometry_mapping_table)
         self.geometry_crs_input = QLineEdit("EPSG:32650")
-        layout.addWidget(QLabel("计算投影 CRS"))
+        self._add_field_label(layout, "计算投影 CRS")
         layout.addWidget(self.geometry_crs_input)
         self.geometry_min_area_spin = QDoubleSpinBox()
         self.geometry_min_area_spin.setRange(0, 1_000_000_000)
         self.geometry_min_area_spin.setDecimals(2)
         self.geometry_min_area_spin.setSuffix(" m²")
-        layout.addWidget(QLabel("最小面积阈值"))
+        self._add_field_label(layout, "最小面积阈值")
         layout.addWidget(self.geometry_min_area_spin)
         self.geometry_thresholds_input = QLineEdit("0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9")
-        layout.addWidget(QLabel("外接矩形 IoU 阈值"))
+        self._add_field_label(layout, "外接矩形 IoU 阈值")
         layout.addWidget(self.geometry_thresholds_input)
         self.geometry_bandwidth_spin = QDoubleSpinBox()
         self.geometry_bandwidth_spin.setRange(1, 1_000_000)
         self.geometry_bandwidth_spin.setValue(5000)
         self.geometry_bandwidth_spin.setSuffix(" m")
-        layout.addWidget(QLabel("地理加权带宽"))
+        self._add_field_label(layout, "地理加权带宽")
         layout.addWidget(self.geometry_bandwidth_spin)
-        layout.addWidget(QLabel("输出目录（留空则使用项目运行目录）"))
+        self._add_field_label(layout, "输出目录（留空则使用项目运行目录）")
         output_row = QHBoxLayout()
         self.geometry_output_input = QLineEdit()
         output_row.addWidget(self.geometry_output_input, 1)
@@ -596,12 +655,17 @@ class WorkbenchPage(QWidget):
         self.geometry_options = scroll
         return scroll
 
-    def _add_select(self, body, label_text, items=None):
-        label = QLabel(label_text)
-        label.setObjectName("Muted")
+    def _add_field_label(self, body, text):
+        """表单字段名统一走这里，避免有的用 Muted、有的用默认色。"""
+        label = QLabel(text)
+        label.setObjectName("FieldLabel")
         body.addWidget(label)
+        return label
+
+    def _add_select(self, body, label_text, items=None):
+        self._add_field_label(body, label_text)
         combo = NoWheelComboBox()
-        combo.setFixedHeight(32)
+        combo.setFixedHeight(_CONTROL_HEIGHT)
         if items:
             combo.addItems(items)
         self._style_combo(combo)
@@ -624,12 +688,6 @@ class WorkbenchPage(QWidget):
             "QAbstractItemView { background: #ffffff; color: #26363c; "
             "selection-background-color: #e3f3ef; selection-color: #1f695e; }"
         )
-
-    def _update_bandwidth_unit(self, *_):
-        if self.bandwidth_mode_combo.currentText() == "距离（米）":
-            self.bw_unit.setText("米")
-        else:
-            self.bw_unit.setText("近邻")
 
     @staticmethod
     def _set_combo(combo, text):
@@ -671,7 +729,8 @@ class WorkbenchPage(QWidget):
         result_shp = getattr(run.result, "output_shp", "") or ""
         load_path = result_shp if (result_shp and Path(result_shp).exists()) else run.shp_path
         if load_path:
-            self.load_shp(load_path)
+            # 下面第 4 步会用 _show_results 填入带结果列的表，这里不要抢先覆盖
+            self.load_shp(load_path, fill_table=False)
         # 2. 参数面板回填
         self._set_combo(self.x_combo, p.get("independent_variable", ""))
         self._set_combo(self.y_combo, p.get("dependent_variable", ""))
@@ -687,7 +746,6 @@ class WorkbenchPage(QWidget):
         else:
             self.param_tabs.setCurrentIndex(0)
         self.save_result_shp.setChecked(bool(p.get("write_shp", True)))
-        self._update_bandwidth_unit()
         # 3. 设色还原
         if run.symbology_field:
             self._set_combo(self.symbology_field_combo, run.symbology_field)
@@ -911,28 +969,28 @@ class WorkbenchPage(QWidget):
         slider = getattr(self, "bandwidth_slider", None)
         if spec is None or slider is None:
             return
-        lo, hi = spec["lo"], spec["hi"]
-        step_lo, step_hi = _BANDWIDTH_STEP_RANGES[mode]
+        lo, hi = _BANDWIDTH_PERCENT["lo"], _BANDWIDTH_PERCENT["hi"]
+        step_lo, step_hi = _BANDWIDTH_STEP_RANGE
         slider.blockSignals(True)
         self.bandwidth_step_spin.blockSignals(True)
         slider.setRange(lo, hi)
         self.bandwidth_step_spin.setRange(step_lo, step_hi)
-        step = self._bw_step_values.get(mode, spec["step"])
+        step = self._bw_step_values.get(mode, _BANDWIDTH_STEP_DEFAULT)
         if not (step_lo <= step <= step_hi):
-            step = spec["step"]
+            step = _BANDWIDTH_STEP_DEFAULT
         self.bandwidth_step_spin.setValue(step)
         slider.setSingleStep(step)
         slider.setPageStep(max(step * 2, 1))
-        value = self._bw_slider_values.get(mode, spec["default"])
+        value = self._bw_slider_values.get(mode, _BANDWIDTH_PERCENT["default"])
         if not (lo <= value <= hi):
-            value = spec["default"]
+            value = _BANDWIDTH_PERCENT["default"]
         slider.setValue(value)
         slider.blockSignals(False)
         self.bandwidth_step_spin.blockSignals(False)
-        self.bw_mode_hint.setText(spec["hint"])
-        self.bw_lo_label.setText(str(lo))
-        self.bw_hi_label.setText(str(hi))
-        self.bw_step_unit.setText(spec["unit"])
+        self._refresh_bandwidth_baseline_hint()
+        self.bw_lo_label.setText(f"{lo}%")
+        self.bw_hi_label.setText(f"{hi}%")
+        self.bw_step_unit.setText("%")
         self._refresh_bandwidth_sequence_hint()
         # 刷新展示（不自动触发快照生成）
         self._on_bandwidth_slider_changed(slider.value(), auto_generate=False)
@@ -999,8 +1057,12 @@ class WorkbenchPage(QWidget):
             "QPushButton { background: #9aa9a6; color: #ffffff; border: 0; }" if busy else ""
         )
 
-    def load_shp(self, path, reset_xy=True):
-        from core.io.readers import read_shapefile_geometry
+    def load_shp(self, path, reset_xy=True, fill_table=True):
+        """把矢量 / 栅格显示到小地图。矢量解析在后台线程进行，不阻塞界面。
+
+        fill_table=False 用于「分析完成后自动加载结果 SHP」等场景：属性表此时已由
+        _show_results 填好带 GWR 结果列的内容，不应被原始的字段表覆盖。
+        """
         suffix = Path(path).suffix.lower()
         if suffix in {".tif", ".tiff", ".img", ".asc"}:
             self.map_canvas.load_raster(path)
@@ -1009,11 +1071,47 @@ class WorkbenchPage(QWidget):
         if suffix != ".shp":
             self.statusMessage.emit("仅支持 SHP 或栅格（TIF/IMG/ASC）显示")
             return
-        geometry = read_shapefile_geometry(path)
-        if not geometry["geometries"]:
-            self.statusMessage.emit("未能解析 SHP 几何（可能是不支持的几何类型）")
+        self._start_vector_load(path, reset_xy, fill_table)
+
+    def _start_vector_load(self, path, reset_xy, fill_table=True):
+        """后台解析矢量后加载到小地图。
+
+        栅格转面等来源的 SHP 可达十几万要素，解析 + 建缓存需要数秒；放在工作线程
+        执行，界面始终可响应，并立即显示「加载中」占位。
+        """
+        self._vector_load_seq += 1
+        self._pending_reset_xy = reset_xy
+        self._pending_fill_table = fill_table
+        name = Path(path).name
+        self.map_canvas.set_loading(True, f"正在加载矢量：{name}")
+        self.statusMessage.emit(f"正在加载矢量：{name}")
+
+        thread = QThread(self)
+        worker = VectorLoadWorker(self._vector_load_seq, path, _MAP_MAX_RECORDS)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_vector_loaded)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # 持有引用，避免线程 / 工作对象被 GC 导致 started 信号不触发。
+        # 释放放在本类的槽里（主线程）而非 thread.finished 上：后者在工作线程触发，
+        # 且 QThread 被 deleteLater 回收后再取属性会抛 "wrapped C/C++ object deleted"。
+        self._vector_loads[self._vector_load_seq] = (thread, worker)
+        thread.start()
+
+    @Slot(int, str, object, str)
+    def _on_vector_loaded(self, seq, path, payload, error):
+        self._vector_loads.pop(seq, None)
+        # 已被后续加载请求取代的过期结果直接丢弃，避免旧数据覆盖新图层。
+        if seq != self._vector_load_seq:
             return
-        attrs = read_attributes(path, limit=0)
+        self.map_canvas.set_loading(False)
+        if error or not payload:
+            self.statusMessage.emit(f"矢量加载失败：{error}")
+            return
+        geometry = payload["geometry"]
+        attrs = payload["attrs"]
         self._map_path = path
         self._map_geometry = geometry
         self._map_fields = attrs["fields"]
@@ -1022,12 +1120,17 @@ class WorkbenchPage(QWidget):
             for c, f in enumerate(self._map_fields):
                 self._map_values[f].append(row[c] if c < len(row) else None)
         self.map_canvas.load_shapes(geometry)
+        if self._pending_fill_table:
+            # 属性表跟地图走：表行与地图要素一一对应，两者才能按行联动高亮
+            self._fill_table_from_map()
         self._reset_bandwidth_explore()
         self._refresh_symbology_fields()
-        if reset_xy:
+        if self._pending_reset_xy:
             self._refresh_xy_from_map()
         self._refresh_chart_window()
-        self.statusMessage.emit(f"已加载 {len(geometry['geometries']):,} 个几何要素到地图")
+        shown = len(geometry["geometries"])
+        note = f"，仅显示前 {_MAP_MAX_RECORDS:,} 个要素" if shown >= _MAP_MAX_RECORDS else ""
+        self.statusMessage.emit(f"已加载 {shown:,} 个几何要素到地图{note}")
 
     def _on_map_raster_loaded(self, error):
         if error:
@@ -1035,26 +1138,62 @@ class WorkbenchPage(QWidget):
         else:
             self.statusMessage.emit("栅格已加载到小地图")
 
+    def _feature_label(self, fid):
+        name = self._map_values.get("name", [])
+        info = f"要素 #{fid}"
+        if name and fid < len(name):
+            info += f"（{name[fid]}）"
+        return info
+
+    def _select_table_rows(self, rows):
+        """在属性表中选中若干行并滚动到首行（不回弹触发地图高亮）。"""
+        if not self._table_linked:
+            return
+        rows = [r for r in rows if 0 <= r < self.attr_model.rowCount()]
+        self._syncing_selection = True
+        try:
+            selection = QItemSelection()
+            last_column = max(self.attr_model.columnCount() - 1, 0)
+            for r in rows:
+                selection.select(self.attr_model.index(r, 0), self.attr_model.index(r, last_column))
+            flags = QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows
+            self.result_table.selectionModel().select(selection, flags)
+            if rows:
+                self.result_table.scrollTo(self.attr_model.index(rows[0], 0))
+        finally:
+            self._syncing_selection = False
+
     def _on_map_feature_clicked(self, fid):
-        self.map_canvas.highlight_feature(fid)
+        """地图点要素：高亮该要素，并在属性表中选中对应行。"""
+        self.map_canvas.highlight_features(fid)
         if self._chart_window is not None:
             self._chart_window.highlight_feature(fid)
-        name = self._map_values.get("name", [])
-        info = f"要素 #{fid}"
-        if name and fid < len(name):
-            info += f"（{name[fid]}）"
-        self.statusMessage.emit(f"已高亮 {info}")
+        self._select_table_rows([fid])
+        self.statusMessage.emit(f"已高亮 {self._feature_label(fid)}")
+
+    def _on_table_selection_changed(self):
+        """属性表选中若干行：地图上对应的区域一起高亮。"""
+        if self._syncing_selection or not self._table_linked:
+            return
+        rows = sorted({index.row() for index in self.result_table.selectionModel().selectedIndexes()})
+        self.map_canvas.highlight_features(rows)
+        if self._chart_window is not None:
+            self._chart_window.highlight_feature(rows[0] if rows else None)
+        if not rows:
+            self.statusMessage.emit("已取消高亮")
+        elif len(rows) == 1:
+            self.statusMessage.emit(f"已高亮 {self._feature_label(rows[0])}")
+        else:
+            self.statusMessage.emit(f"已在属性表中选中 {len(rows)} 行，地图上对应区域已高亮")
 
     def _on_chart_feature_selected(self, fid):
-        self.map_canvas.highlight_feature(fid)
-        name = self._map_values.get("name", [])
-        info = f"要素 #{fid}"
-        if name and fid < len(name):
-            info += f"（{name[fid]}）"
-        self.statusMessage.emit(f"已高亮 {info}")
+        self.map_canvas.highlight_features(fid)
+        self._select_table_rows([fid])
+        self.statusMessage.emit(f"已高亮 {self._feature_label(fid)}")
 
     def _on_chart_selection_cleared(self):
-        self.map_canvas.highlight_feature(None)
+        self.map_canvas.highlight_features(None)
+        self._select_table_rows([])
         self.statusMessage.emit("已取消高亮")
 
     def _open_chart_window(self):
@@ -1097,20 +1236,46 @@ class WorkbenchPage(QWidget):
                 numeric.append(f)
         return numeric
 
+    def _symbology_fields(self):
+        """设色字段候选：按唯一值设色时纳入全部字段（类别常在文本字段里），否则只要数值字段。"""
+        if self.symbology_method_combo.currentText() == "唯一值":
+            numeric = self._numeric_fields()
+            return numeric + [f for f in self._map_fields if f not in numeric]
+        return self._numeric_fields()
+
     def _refresh_symbology_fields(self):
-        numeric = self._numeric_fields()
+        fields = self._symbology_fields()
         current = self.symbology_field_combo.currentText()
         self.symbology_field_combo.blockSignals(True)
         self.symbology_field_combo.clear()
-        self.symbology_field_combo.addItems(numeric)
+        self.symbology_field_combo.addItems(fields)
         self.symbology_field_combo.blockSignals(False)
-        if current and current in numeric:
+        if current and current in fields:
             self.symbology_field_combo.setCurrentText(current)
-        elif "Local_R2" in numeric:
+        elif "Local_R2" in fields:
             # 运行 GWR 后默认展示局部 R²（与带宽区间探索的地图着色一致）
             self.symbology_field_combo.setCurrentText("Local_R2")
         self._update_field_tooltip()
         self._apply_symbology()
+
+    def _classify_series(self, values):
+        """按当前设色方法分级，返回 (labels, indices, colors)。
+
+        labels 为各类别显示名，唯一值是取值本身，区间方法是 "a–b" 文本；
+        indices 与 values 等长（缺失为 None），colors 与 labels 一一对应。
+        """
+        if self.symbology_method_combo.currentText() == "唯一值":
+            labels, indices = classify_unique(values)
+            return labels, indices, categorical_colors(len(labels))
+        method = self.symbology_method_combo.currentText()
+        n_classes = self.symbology_classes_spin.value()
+        manual = self._parse_manual_breaks() if method == "手动" else None
+        breaks, indices = classify(values, method, n_classes, manual)
+        n = len(breaks) - 1
+        if n <= 0:
+            return [], indices, []
+        labels = [f"{self._fmt_number(breaks[i])}–{self._fmt_number(breaks[i + 1])}" for i in range(n)]
+        return labels, indices, auto_colors(values, n)
 
     def _apply_symbology(self):
         field = self.symbology_field_combo.currentText()
@@ -1119,27 +1284,27 @@ class WorkbenchPage(QWidget):
             self._clear_legend()
             return
         values = self._map_values[field]
-        method = self.symbology_method_combo.currentText()
-        n_classes = self.symbology_classes_spin.value()
-        manual = self._parse_manual_breaks() if method == "手动" else None
-        breaks, indices = classify(values, method, n_classes, manual)
-        nc = len(breaks) - 1
+        labels, indices, colors = self._classify_series(values)
+        nc = len(labels)
         if nc <= 0:
             self.map_canvas.set_feature_colors([])
             self._clear_legend()
             return
-        colors = auto_colors(values, nc)
         feature_colors = [None] * len(indices)
         for i, idx in enumerate(indices):
             if idx is not None and 0 <= idx < nc:
                 feature_colors[i] = QColor(colors[idx])
         self.map_canvas.set_feature_colors(feature_colors)
-        self._update_legend(breaks, colors)
+        self._update_legend(labels, colors)
+        if self.map_note is not None:
+            self.map_note.setText(f"{field} · {len(labels)} 类")
 
     def _on_method_changed(self, method):
         self.manual_breaks_input.setVisible(method == "手动")
-        self.symbology_classes_spin.setEnabled(method != "手动")
-        self._apply_symbology()
+        # 唯一值的类别由字段取值决定，分级数不适用
+        self.symbology_classes_spin.setEnabled(method not in ("手动", "唯一值"))
+        # 唯一值允许选文本字段，其余方法只列数值字段，故切换方法时重填字段候选
+        self._refresh_symbology_fields()
 
     def _update_field_tooltip(self, field=None):
         if field is None:
@@ -1148,11 +1313,14 @@ class WorkbenchPage(QWidget):
             self.field_info_label.set_info("鼠标悬停查看设色字段含义与分级配色说明")
             return
         meaning, level_hint = FIELD_INFO.get(field, ("该字段暂无说明", "颜色越深代表数值越大"))
-        vals = [v for v in self._map_values[field] if v is not None]
-        if vals and min(vals) < 0:
-            ramp_hint = "发散色带：蓝色=负值，白色≈0，红色=正值"
+        values = self._map_values[field]
+        if self.symbology_method_combo.currentText() == "唯一值":
+            ramp_hint = "类别色板：每个不同取值为一类，颜色之间没有大小含义"
         else:
-            ramp_hint = "单色渐变：颜色越深，数值越大"
+            # 只拿数值比大小：文本字段参与 min() 会抛 TypeError
+            vals = [v for v in values if isinstance(v, (int, float))]
+            ramp_hint = ("发散色带：蓝色=负值，白色≈0，红色=正值" if vals and min(vals) < 0
+                         else "单色渐变：颜色越深，数值越大")
         self.field_info_label.set_info(
             f"字段：{field}\n含义：{meaning}\n分级解读：{level_hint}\n配色：{ramp_hint}"
         )
@@ -1167,9 +1335,12 @@ class WorkbenchPage(QWidget):
         except ValueError:
             return None
 
-    def _update_legend(self, breaks, colors):
+    def _update_legend(self, labels, colors):
         clear_layout(self.legend_layout)
-        for i in range(len(breaks) - 1):
+        # 面板不滚动：唯一值可能有几十类，全部铺开会把面板撑变形，故只列前若干类。
+        shown = min(len(labels), len(colors), _LEGEND_MAX_ITEMS)
+        for i in range(shown):
+            text = labels[i]
             item = QWidget()
             item_layout = QHBoxLayout(item)
             item_layout.setContentsMargins(0, 0, 0, 0)
@@ -1178,10 +1349,14 @@ class WorkbenchPage(QWidget):
             swatch.setFixedSize(16, 12)
             swatch.setStyleSheet(f"background: {colors[i]}; border: 1px solid #cbd5d2; border-radius: 2px;")
             item_layout.addWidget(swatch)
-            label = QLabel(f"{self._fmt_number(breaks[i])}–{self._fmt_number(breaks[i + 1])}")
+            label = QLabel(text)
             label.setObjectName("Muted")
             item_layout.addWidget(label, 1)
             self.legend_layout.addWidget(item, i // 2, i % 2)
+        if len(labels) > shown:
+            note = QLabel(f"… 共 {len(labels)} 类，图例仅列前 {shown} 类")
+            note.setObjectName("Muted")
+            self.legend_layout.addWidget(note, (shown - 1) // 2 + 1, 0, 1, 2)
 
     def _clear_legend(self):
         clear_layout(self.legend_layout)
@@ -1194,31 +1369,59 @@ class WorkbenchPage(QWidget):
             return f"{v:.4g}"
         return str(v)
 
+    def _fill_table(self, fields, columns, note):
+        """填充属性表。填表会清空选中，用标志位避免反过来触发地图高亮。"""
+        self._syncing_selection = True
+        try:
+            self.attr_model.set_columns(fields, columns, max((len(c) for c in columns), default=0))
+        finally:
+            self._syncing_selection = False
+        self.attr_hint.setText(note)
+
+    def _fill_table_from_map(self):
+        """用地图当前数据填属性表，使表行与地图要素一一对应（联动高亮的前提）。"""
+        if not self._map_fields:
+            return
+        # 直接引用 _map_values，不复制：模型按需取值，十几万行也不额外占内存
+        columns = [self._map_values.get(f, []) for f in self._map_fields]
+        total = max((len(c) for c in columns), default=0)
+        name = Path(self._map_path).name if self._map_path else ""
+        self._fill_table(self._map_fields, columns, f"{name}：{total:,} 行 · {len(self._map_fields)} 字段")
+        self._table_linked = True
+
     def _load_source_table(self, path):
-        data = read_attributes(path, limit=20000)
+        data = read_attributes(path, limit=_MAP_MAX_RECORDS)
         fields = data["fields"]
         rows = data["rows"]
         name = Path(path).stem
         if not fields:
-            self.result_table.clear()
-            self.result_table.setRowCount(0)
-            self.result_table.setColumnCount(0)
+            self._syncing_selection = True
+            try:
+                self.attr_model.clear()
+            finally:
+                self._syncing_selection = False
+            self._table_linked = False
             self.attr_hint.setText(f"无法读取属性表：{path}")
             self.statusMessage.emit(f"无法读取属性表：{path}")
             return
         note = f"{name}：{len(rows)} 行 · {len(fields)} 字段"
         if data["truncated"]:
             note += "（已截断）"
-        fill_table(self.result_table, fields, rows)
-        self.attr_hint.setText(note)
+        self._fill_table(fields, columns_from_rows(fields, rows), note)
+        # 只有拖入的正是地图当前数据时，行序才与地图要素对应，联动才有意义
+        self._table_linked = Path(path) == Path(self._map_path) if self._map_path else False
+        if not self._table_linked:
+            note += "（与地图数据不一致，未启用联动高亮）"
+            self.attr_hint.setText(note)
         self.statusMessage.emit(f"已加载属性表：{note}")
 
-    def _show_results(self, shp_path, columns):
+    def _show_results(self, shp_path, result_columns):
         """把 GWR 结果列追加到原始属性表后展示。"""
-        data = read_attributes(shp_path, limit=20000)
-        fields = data["fields"]
+        data = read_attributes(shp_path, limit=_MAP_MAX_RECORDS)
+        fields = list(data["fields"])
         rows = data["rows"]
         name = Path(shp_path).stem
+        table_columns = columns_from_rows(fields, rows)
         specs = [
             ("local_r2", "局部 R²"),
             ("coefficient", "系数"),
@@ -1229,14 +1432,15 @@ class WorkbenchPage(QWidget):
             ("lrmse", "LRMSE"),
         ]
         for key, label in specs:
-            values = columns.get(key)
+            values = result_columns.get(key)
             if values is None:
                 continue
             fields.append(label)
-            for i, row in enumerate(rows):
-                row.append(values[i] if i < len(values) else None)
-        fill_table(self.result_table, fields, rows)
-        self.attr_hint.setText(f"{name}：{len(rows)} 行 · {len(fields)} 字段（含 GWR 结果列）")
+            table_columns.append([values[i] if i < len(values) else None for i in range(len(rows))])
+        self._fill_table(fields, table_columns,
+                         f"{name}：{len(rows)} 行 · {len(fields)} 字段（含 GWR 结果列）")
+        # 结果 SHP 按原始要素顺序写出，故表行与地图要素仍一一对应
+        self._table_linked = True
 
     def _save_result_shp(self):
         src = self._result_output_shp
@@ -1276,20 +1480,187 @@ class WorkbenchPage(QWidget):
         status = getattr(self, "bw_status", None)
         if status is not None:
             status.setText("选好参数后，拖动滑块即自动生成并查看地图变化")
+        # 数据换了，100% 对应的基准随之变化，提示与换算值要跟着刷新
+        if getattr(self, "bandwidth_slider", None) is not None:
+            self._refresh_bandwidth_baseline_hint()
+
+    def _bandwidth_baseline(self, mode=None):
+        """当前模式 100% 对应的实际带宽基准，返回 (基准值, 说明)；无法推算返回 (None, 原因)。
+
+        基准随数据而定，不写死：自适应带宽以有效样本数上限，距离类以研究区范围上限，
+        栅格窗口以栅格短边像素数上限。结果按数据缓存，避免反复解析大文件。
+        """
+        mode = mode or self._current_mode()
+        if mode == "raster":
+            paths = self._selected_raster_paths()
+            if not paths:
+                return None, "请先在「栅格数据」页签勾选栅格"
+            key = ("raster", tuple(paths))
+            if key in self._bw_baseline_cache:
+                return self._bw_baseline_cache[key]
+            try:
+                import rasterio
+                with rasterio.open(paths[0]) as dataset:
+                    side = min(dataset.width, dataset.height)
+                if side <= _RASTER_WINDOW_MAX:
+                    result = (side, f"栅格短边 {side:,} 像素")
+                else:
+                    result = (_RASTER_WINDOW_MAX,
+                              f"窗口上限 {_RASTER_WINDOW_MAX} 像素（栅格短边 {side:,}）")
+            except Exception as exc:  # noqa: BLE001 - 读不到栅格就按未知处理
+                result = (None, f"无法读取栅格尺寸：{exc}")
+            self._bw_baseline_cache[key] = result
+            return result
+
+        if mode == "geometry":
+            path = self.geometry_a_combo.currentData()
+            crs = self.geometry_crs_input.text().strip() or "EPSG:32650"
+            if not path:
+                return None, "请先选择几何数据 A"
+            metres = self._extent_diagonal_m(path, crs)
+            if metres is None:
+                return None, "无法从该数据推算研究区范围"
+            return metres, f"研究区范围 {metres:,.0f} m"
+
+        # 属性模式
+        path = self.source_vector_path()
+        if not path:
+            return None, "请先拖入 SHP 数据到地图"
+        if self.bandwidth_mode_combo.currentText() == "距离（米）":
+            metres = self._extent_diagonal_m(path, _ATTRIBUTE_PROJ_CRS)
+            if metres is None:
+                return None, "无法从该数据推算研究区范围"
+            return metres, f"研究区范围 {metres:,.0f} m"
+        count = self._valid_sample_count(path)
+        return count, f"有效样本 {count:,} 个"
+
+    def _valid_sample_count(self, path):
+        """源矢量中 X / Y 均非空的样本数（与 R 脚本 complete.cases 的口径一致）。"""
+        key = (path, self.x_combo.currentText(), self.y_combo.currentText())
+        if key in self._bw_count_cache:
+            return self._bw_count_cache[key]
+        data = read_attributes(path, limit=0)
+        fields = data["fields"]
+        x_field, y_field = key[1], key[2]
+        if x_field in fields and y_field in fields:
+            first, second = fields.index(x_field), fields.index(y_field)
+            limit = max(first, second)
+            count = sum(
+                1 for row in data["rows"]
+                if len(row) > limit and row[first] is not None and row[second] is not None
+            )
+        else:
+            count = data["row_count"]
+        self._bw_count_cache[key] = count
+        return count
+
+    def _extent_diagonal_m(self, path, target_crs):
+        """源矢量范围框对角线在目标投影下的长度（米）。
+
+        用 .shp 头部已有的范围框（无需解析几何）配合 pyproj 换算到算法所用的投影，
+        与 R / 几何脚本内部的米制口径一致。
+        """
+        key = (path, target_crs)
+        if key in self._bw_extent_cache:
+            return self._bw_extent_cache[key]
+        result = None
+        try:
+            from pyproj import CRS, Transformer
+            raw = Path(path).read_bytes()[:100]
+            if len(raw) >= 68:
+                xmin, ymin, xmax, ymax = struct.unpack_from("<4d", raw, 36)
+                prj = Path(path).with_suffix(".prj")
+                source = (CRS.from_wkt(prj.read_text(encoding="utf-8", errors="replace"))
+                          if prj.exists() else CRS.from_user_input("EPSG:4326"))
+                transform = Transformer.from_crs(
+                    source, CRS.from_user_input(target_crs), always_xy=True)
+                x0, y0 = transform.transform(xmin, ymin)
+                x1, y1 = transform.transform(xmax, ymax)
+                result = math.hypot(x1 - x0, y1 - y0)
+        except Exception:  # noqa: BLE001 - 坐标系缺失或无法换算时按未知处理
+            result = None
+        self._bw_extent_cache[key] = result
+        return result
+
+    def _percent_to_bandwidth(self, percent, mode, baseline):
+        """百分比 → 实际带宽；baseline 为 100% 对应的上限。"""
+        if not baseline or baseline <= 0:
+            return None
+        raw = baseline * percent / 100.0
+        if mode == "raster":
+            value = max(3, int(round(raw)))     # 窗口须为 >=3 的奇数
+            return value if value % 2 else value + 1
+        if mode == "attribute" and self.bandwidth_mode_combo.currentText() != "距离（米）":
+            return max(2, int(round(raw)))      # 最近邻个数至少 2
+        return max(10, int(round(raw / 10.0)) * 10)   # 距离类取整到 10 m
+
+    def _bandwidth_plan(self, mode=None):
+        """当前模式的 [(百分比, 实际带宽)] 序列：百分比定轴，实际值按数据基准换算。
+
+        换算后出现重复值时只保留一次，避免重复跑同一带宽。
+        """
+        mode = mode or self._current_mode()
+        baseline, _note = self._bandwidth_baseline(mode)
+        step = max(1, self.bandwidth_step_spin.value())
+        plan, seen = [], set()
+        for percent in range(_BANDWIDTH_PERCENT["lo"], _BANDWIDTH_PERCENT["hi"] + 1, step):
+            value = self._percent_to_bandwidth(percent, mode, baseline)
+            if value is None or value in seen:
+                continue
+            seen.add(value)
+            plan.append((percent, value))
+        return plan
 
     def _bandwidth_sequence(self):
-        """当前模式的带宽取值序列（步长真正生效：序列按步长生成并交给算法计算）。"""
+        """交给算法的实际带宽序列（按步长生成的百分比换算而来）。"""
+        return [value for _percent, value in self._bandwidth_plan()]
+
+    def _bandwidth_unit(self, mode=None):
+        mode = mode or self._current_mode()
+        if mode == "attribute":
+            return "米" if self.bandwidth_mode_combo.currentText() == "距离（米）" else "近邻"
+        return _BANDWIDTH_MODES.get(mode, {}).get("unit", "")
+
+    def _format_bandwidth(self, value, mode=None):
+        return f"≈ {value:,} {self._bandwidth_unit(mode)}"
+
+    def _bandwidth_percent_label(self, percent):
+        """滑块百分比对应的换算说明，如「≈ 92,938 近邻」。"""
         mode = self._current_mode()
-        spec = _BANDWIDTH_MODES.get(mode, _BANDWIDTH_MODES["attribute"])
-        step = max(1, self.bandwidth_step_spin.value())
-        return list(range(spec["lo"], spec["hi"] + 1, step))
+        baseline, note = self._bandwidth_baseline(mode)
+        value = self._percent_to_bandwidth(percent, mode, baseline)
+        return note if value is None else self._format_bandwidth(value, mode)
+
+    def _refresh_bandwidth_baseline_hint(self):
+        """刷新「100% = …」说明与当前百分比的换算值；数据或模式变化后调用。"""
+        mode = self._current_mode()
+        hint = getattr(self, "bw_mode_hint", None)
+        if hint is not None:
+            baseline, note = self._bandwidth_baseline(mode)
+            prefix = _BANDWIDTH_MODES.get(mode, {}).get("hint", "")
+            hint.setText(f"{prefix}　·　100% = {note}" if baseline else f"{prefix}　·　{note}")
+        converted = getattr(self, "bw_converted", None)
+        slider = getattr(self, "bandwidth_slider", None)
+        if converted is not None and slider is not None:
+            converted.setText(self._bandwidth_percent_label(slider.value()))
+        self._refresh_bandwidth_sequence_hint()
 
     def _refresh_bandwidth_sequence_hint(self):
         hint = getattr(self, "bw_sequence_hint", None)
         if hint is None:
             return
-        seq = self._bandwidth_sequence()
-        hint.setText(f"共 {len(seq)} 个取值（{seq[0]} ~ {seq[-1]}）")
+        plan = self._bandwidth_plan()
+        if not plan:
+            hint.setText("基准未知，无法换算实际带宽")
+            return
+        hint.setText(f"共 {len(plan)} 个取值（{plan[0][1]:,} ~ {plan[-1][1]:,}）")
+
+    def _on_bandwidth_meaning_changed(self, *_):
+        """「带宽含义」在近邻 / 距离间切换：基准与换算值随之改变，旧快照不再适用。"""
+        mode = self._current_mode()
+        self._bandwidth_snapshots.pop(mode, None)
+        self._clear_bandwidth_caches(mode)
+        self._refresh_bandwidth_baseline_hint()
 
     def _on_bandwidth_step_changed(self, value):
         """步长变化：同步滑块步进，并使当前模式的快照失效（旧序列不再匹配）。"""
@@ -1330,10 +1701,10 @@ class WorkbenchPage(QWidget):
             self.statusMessage.emit("请先拖入 SHP 数据到地图")
             return
         if not y or not x:
-            self.statusMessage.emit("请选择因变量 Y 和自变量 X")
+            self.statusMessage.emit("请选择数据 1 和数据 2")
             return
         if y == x:
-            self.statusMessage.emit("因变量 Y 和自变量 X 不能相同")
+            self.statusMessage.emit("数据 1 和数据 2 不能是同一字段")
             return
         config = {
             "shp_path": path,
@@ -1455,7 +1826,13 @@ class WorkbenchPage(QWidget):
             self.bw_status.setText("带宽快照结果为空")
             self.statusMessage.emit("带宽快照结果为空")
             return
-        self._bandwidth_snapshots[mode] = {"mode": mode, "bandwidths": bandwidths, "curve": curve, "raw": raw}
+        # 滑块走百分比、快照存实际带宽，按值把两者对上，供滑块定位使用
+        by_value = {value: percent for percent, value in self._bandwidth_plan(mode)}
+        percents = [by_value.get(value, value) for value in bandwidths]
+        self._bandwidth_snapshots[mode] = {
+            "mode": mode, "percents": percents, "bandwidths": bandwidths,
+            "curve": curve, "raw": raw,
+        }
         self._clear_bandwidth_caches(mode)
         self._on_bandwidth_slider_changed(self.bandwidth_slider.value(), auto_generate=False)
         self.bw_status.setText(f"已生成 {len(bandwidths)} 个带宽快照，拖动滑块查看地图变化")
@@ -1464,37 +1841,37 @@ class WorkbenchPage(QWidget):
     def _on_bandwidth_slider_changed(self, value, auto_generate=True):
         mode = self._current_mode()
         self._bw_slider_values[mode] = value
+        self.bandwidth_value.setText(f"{value}%")
         snapshots = self._bandwidth_snapshots.get(mode)
-        if not snapshots:
-            self.bandwidth_value.setText(str(value))
+        index = self._bandwidth_index(value, mode) if snapshots else None
+        converted = getattr(self, "bw_converted", None)
+        if converted is not None:
+            # 已有快照时显示该档真正跑过的带宽，避免与换算估计值对不上
+            converted.setText(self._format_bandwidth(snapshots["bandwidths"][index])
+                              if index is not None else self._bandwidth_percent_label(value))
+        if index is None:
             # 尚未生成快照：拖动即自动触发一次预计算
-            if auto_generate and not getattr(self, "_bandwidth_generating", False):
+            if (not snapshots and auto_generate
+                    and not getattr(self, "_bandwidth_generating", False)):
                 self._run_bandwidth_snapshots()
             return
-        index = self._bandwidth_index(value, mode)
-        if index is None:
-            self.bandwidth_value.setText(str(value))
-            return
         bandwidths = snapshots.get("bandwidths", [])
-        self.bandwidth_value.setText(str(bandwidths[index]))
-        self.statusMessage.emit(f"带宽：{bandwidths[index]}")
+        self.statusMessage.emit(f"带宽 {value}% ≈ {bandwidths[index]:,}")
         self._update_metric_line(index)
         self._update_bandwidth_legend(index)
         self._set_bandwidth_map(index)
 
-    def _bandwidth_index(self, value, mode=None):
+    def _bandwidth_index(self, percent, mode=None):
+        """滑块百分比 → 快照下标（滑块走百分比，快照按实际带宽存）。"""
         mode = mode or self._current_mode()
         snapshots = self._bandwidth_snapshots.get(mode)
         if not snapshots:
             return None
-        bandwidths = snapshots.get("bandwidths", [])
-        if not bandwidths:
+        percents = snapshots.get("percents", [])
+        if not percents:
             return None
-        if value in bandwidths:
-            return bandwidths.index(value)
-        # 滑块值落在取值之间时，取最近的一个带宽
-        nearest = min(range(len(bandwidths)), key=lambda i: abs(bandwidths[i] - value))
-        return nearest
+        # 滑块百分比通常落在两个取值之间，取最近的一档
+        return min(range(len(percents)), key=lambda i: abs(percents[i] - percent))
 
     def _update_metric_line(self, index):
         mode = self._current_mode()
@@ -1575,18 +1952,18 @@ class WorkbenchPage(QWidget):
         entries = self._bandwidth_legend_cache.get((self._current_mode(), field), [])
         if not (0 <= index < len(entries)):
             return
-        breaks, colors = entries[index]
-        if not breaks or len(colors) < len(breaks) - 1:
+        labels, colors = entries[index]
+        if not labels or len(colors) < len(labels):
             return
         hint = QLabel("图例")
         hint.setObjectName("Muted")
         legend_layout.addWidget(hint)
-        for i in range(len(breaks) - 1):
+        for i, text in enumerate(labels[:_LEGEND_MAX_ITEMS]):
             swatch = QLabel(" ")
             swatch.setFixedSize(18, 14)
             swatch.setStyleSheet(f"background: {colors[i]}; border: 1px solid #cbd5d2; border-radius: 2px;")
             legend_layout.addWidget(swatch)
-            label = QLabel(f"{self._fmt_number(breaks[i])}–{self._fmt_number(breaks[i + 1])}")
+            label = QLabel(text)
             label.setObjectName("Muted")
             legend_layout.addWidget(label)
         legend_layout.addStretch()
@@ -1650,53 +2027,42 @@ class WorkbenchPage(QWidget):
 
     def _build_feature_colors(self, values):
         """把一档带宽的展示参数按「分层设色」相同的方法分级并映射为每要素填充色（缺失为 None）。"""
-        method = self.symbology_method_combo.currentText()
-        n_classes = self.symbology_classes_spin.value()
-        manual = self._parse_manual_breaks() if method == "手动" else None
-        breaks, indices = classify(values, method, n_classes, manual)
-        nc = len(breaks) - 1
+        labels, indices, colors = self._classify_series(values)
+        nc = len(labels)
         if nc <= 0:
             return [], [], []
-        colors = auto_colors(values, nc)
         feature_colors = [None] * len(indices)
         for i, cls in enumerate(indices):
             if cls is not None and 0 <= cls < nc:
                 feature_colors[i] = QColor(colors[cls])
-        return feature_colors, breaks, colors
+        return feature_colors, labels, colors
 
     def _build_raster_legend(self, values):
         """把一档窗口的局部指标（降采样网格值）分级，生成灰度图例（与地图灰度预览一致：高值更亮）。"""
-        method = self.symbology_method_combo.currentText()
-        n_classes = self.symbology_classes_spin.value()
-        manual = self._parse_manual_breaks() if method == "手动" else None
-        breaks, _indices = classify(values, method, n_classes, manual)
-        nc = len(breaks) - 1
+        labels, _indices, _colors = self._classify_series(values)
+        nc = len(labels)
         if nc <= 0:
             return None, [], []
         colors = []
         for i in range(nc):
             tone = round(60 + 175 * i / max(nc - 1, 1))
             colors.append(f"#{tone:02x}{tone:02x}{tone:02x}")
-        return None, breaks, colors
+        return None, labels, colors
 
     def _build_geometry_colors(self, entry):
         """把一档带宽的 GW 面 IoU 按 source_id 对齐到地图要素，返回配色/图例。"""
         source_ids = entry.get("source_ids") or []
         values = entry.get("values") or []
-        method = self.symbology_method_combo.currentText()
-        n_classes = self.symbology_classes_spin.value()
-        manual = self._parse_manual_breaks() if method == "手动" else None
-        breaks, indices = classify(values, method, n_classes, manual)
-        nc = len(breaks) - 1
+        labels, indices, colors = self._classify_series(values)
+        nc = len(labels)
         if nc <= 0:
             return [], [], []
-        colors = auto_colors(values, nc)
         n_features = len(getattr(self.map_canvas, "shapes", []))
         feature_colors = [None] * n_features
         for feature_id, cls in zip(source_ids, indices):
             if cls is not None and 0 <= cls < nc and 0 <= feature_id < n_features:
                 feature_colors[feature_id] = QColor(colors[cls])
-        return feature_colors, breaks, colors
+        return feature_colors, labels, colors
 
     def update_result(self, result: AnalysisResult, shp_path=None):
         self.set_run_busy(False)

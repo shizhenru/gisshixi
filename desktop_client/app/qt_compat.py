@@ -1,6 +1,21 @@
 try:
-    from PySide6.QtCore import QMimeData, QObject, QPointF, QRectF, QSettings, QThread, Qt, Signal, Slot
-    from PySide6.QtGui import QColor, QDrag, QFont, QFontDatabase, QImage, QPainter, QPen, QBrush, QPalette, QPixmap, QPolygonF, QTransform
+    from PySide6.QtCore import (
+        QAbstractTableModel,
+        QItemSelection,
+        QItemSelectionModel,
+        QMimeData,
+        QModelIndex,
+        QObject,
+        QPointF,
+        QRectF,
+        QSettings,
+        QThread,
+        QTimer,
+        Qt,
+        Signal,
+        Slot,
+    )
+    from PySide6.QtGui import QColor, QDrag, QFont, QFontDatabase, QImage, QPainter, QPainterPath, QPen, QBrush, QPalette, QPixmap, QPolygonF, QTransform
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -30,6 +45,7 @@ try:
         QSpinBox,
         QStackedWidget,
         QTabWidget,
+        QTableView,
         QTableWidget,
         QTableWidgetItem,
         QTextEdit,
@@ -40,8 +56,23 @@ try:
     )
     QT_BINDING = "PySide6"
 except ImportError:
-    from PyQt6.QtCore import QMimeData, QObject, QPointF, QRectF, QSettings, QThread, Qt, pyqtSignal as Signal, pyqtSlot as Slot
-    from PyQt6.QtGui import QColor, QDrag, QFont, QFontDatabase, QImage, QPainter, QPen, QBrush, QPalette, QPixmap, QPolygonF, QTransform
+    from PyQt6.QtCore import (
+        QAbstractTableModel,
+        QItemSelection,
+        QItemSelectionModel,
+        QMimeData,
+        QModelIndex,
+        QObject,
+        QPointF,
+        QRectF,
+        QSettings,
+        QThread,
+        QTimer,
+        Qt,
+        pyqtSignal as Signal,
+        pyqtSlot as Slot,
+    )
+    from PyQt6.QtGui import QColor, QDrag, QFont, QFontDatabase, QImage, QPainter, QPainterPath, QPen, QBrush, QPalette, QPixmap, QPolygonF, QTransform
     from PyQt6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -71,6 +102,7 @@ except ImportError:
         QSpinBox,
         QStackedWidget,
         QTabWidget,
+        QTableView,
         QTableWidget,
         QTableWidgetItem,
         QTextEdit,

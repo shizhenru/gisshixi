@@ -8,6 +8,18 @@ from .algorithms.raster_runner import RasterTerraRunner
 from .models import AnalysisResult
 
 
+def _attribute_artifacts(payload: dict) -> dict:
+    """属性 GWR 的产物清单：结果 SHP + 各类图表路径。"""
+    artifacts = {}
+    if payload.get("output_shp"):
+        artifacts["result_shp"] = payload["output_shp"]
+    figures = payload.get("figures") or {}
+    for name, path in figures.items():
+        if path:
+            artifacts[name] = path
+    return artifacts
+
+
 class AnalysisEngine:
     """Language-neutral task dispatcher. Add more runners without changing the UI."""
 
@@ -65,6 +77,10 @@ class AnalysisEngine:
                 local_values=payload.get("local_values", []),
                 local_columns=payload.get("columns", {}),
                 output_shp=payload.get("output_shp") or "",
+                # 属性 GWR 会把结果 SHP 写到这个目录，结果页据此显示/打开
+                output_dir=payload.get("output_dir") or str(output_path.parent),
+                # 结果 SHP 与四张图都算产物：前者列为「输出文件」，后者填进图表页签
+                artifacts=_attribute_artifacts(payload),
             )
         except Exception as exc:
             return AnalysisResult(

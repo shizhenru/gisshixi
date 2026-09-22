@@ -36,6 +36,9 @@ if (!requireNamespace("jsonlite", quietly = TRUE)) {
 for (pkg in c("sf", "GWmodel", "sp")) {
   if (!requireNamespace(pkg, quietly = TRUE)) write_error(sprintf("请先安装 R 包 %s", pkg))
 }
+# ggplot2 只用于出图，缺失时跳过图、分析结果照常返回
+HAS_GGPLOT <- requireNamespace("ggplot2", quietly = TRUE)
+if (HAS_GGPLOT) suppressPackageStartupMessages(library(ggplot2))
 
 config <- jsonlite::fromJSON(config_path, simplifyVector = FALSE)
 
@@ -60,6 +63,8 @@ PROJ_CRS <- config$crs %||%
 
 WRITE_SHP <- isTRUE(config$write_shp)
 OUT_DIR <- config$output_dir %||% file.path(dirname(output_path), "attribute_results")
+# 立刻建目录：出图发生在 compute() 内部，早于下面写 SHP 的 dir.create
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 suppressPackageStartupMessages({ library(sf); library(GWmodel); library(sp) })
 sf_use_s2(FALSE)
@@ -78,6 +83,93 @@ global_stats <- function(y, x) {
   mre <- if (any(x == 0)) mean(abs(d[x != 0]) / x[x != 0]) else mean(abs(d) / x)
   c(ME = mean(d), MAE = mean(abs(d)), MRE = mre,
     RMSE = sqrt(mean(d^2)), Corr = cor(y, x))
+}
+
+# 全局诊断量格式化：GWmodel 不同版本字段可能缺失，缺失时给 NA 而不是让整段失败
+fmt_diag <- function(value, digits = 4) {
+  if (is.null(value) || length(value) == 0 || !is.finite(as.numeric(value)[1])) return(NA_character_)
+  sprintf(paste0("%.", digits, "f"), as.numeric(value)[1])
+}
+
+# ---------------------------------------------------------------------------
+# 出图：与「属性数据算法/#testcommand.r」的四张图保持同一口径
+#   （散点图由客户端 Python 侧渲染，这里不重复出）
+# ---------------------------------------------------------------------------
+FIG_W <- 8
+FIG_H <- 6
+FIG_DPI <- 150
+
+save_fig <- function(plot, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  if (file.exists(path)) try(unlink(path), silent = TRUE)  # 先删旧图，避免文件被占用
+  tryCatch({
+    ggsave(path, plot = plot, width = FIG_W, height = FIG_H, dpi = FIG_DPI)
+    TRUE
+  }, error = function(e) FALSE)
+}
+
+# 误差直方图：黑虚线 = 0（无误差），红线 = 平均误差；整体偏左说明 X 系统性高于 Y
+fig_error_hist <- function(x, y) {
+  err <- y - x
+  ggplot(data.frame(err = err), aes(x = err)) +
+    geom_histogram(bins = 40, fill = "steelblue", colour = "white", alpha = 0.85) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+    geom_vline(xintercept = mean(err), colour = "red3", linewidth = 0.9) +
+    labs(x = "Error: Y - X", y = "Frequency",
+         title = sprintf("Error distribution | mean = %.4g", mean(err))) +
+    theme_bw()
+}
+
+# 局部 R² 直方图：越靠右拟合越好，分布越宽空间异质性越强
+fig_r2_hist <- function(values) {
+  ggplot(data.frame(v = values), aes(x = v)) +
+    geom_histogram(bins = 40, fill = "darkorange", colour = "white", alpha = 0.85) +
+    labs(x = "Local R-squared", y = "Frequency", title = "Local R2 distribution") +
+    theme_bw()
+}
+
+# GWR 斜率系数直方图：红虚线 = 1（两数据一致时系数应为 1）
+fig_coef_hist <- function(values) {
+  ggplot(data.frame(v = values), aes(x = v)) +
+    geom_histogram(bins = 40, fill = "forestgreen", colour = "white", alpha = 0.85) +
+    geom_vline(xintercept = 1, linetype = "dashed", colour = "red3", linewidth = 0.9) +
+    labs(x = "GWR slope coefficient", y = "Frequency",
+         title = "GWR coefficient | dashed line = 1") +
+    theme_bw()
+}
+
+# 专题图：Local_R2 单色渐变（越深拟合越好）、LME 发散色带（蓝负红正）
+fig_map_r2 <- function(sf_data) {
+  ggplot(sf_data) +
+    geom_sf(aes(fill = Local_R2), colour = NA) +
+    scale_fill_gradient(low = "#FEE391", high = "#662506", limits = c(0, 1), name = "Local R2") +
+    labs(title = "Local R2 map") + theme_void()
+}
+
+fig_map_lme <- function(sf_data) {
+  ggplot(sf_data) +
+    geom_sf(aes(fill = LME), colour = NA) +
+    scale_fill_gradient2(low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+                         midpoint = 0, name = "LME") +
+    labs(title = "Local Mean Error map") + theme_void()
+}
+
+# 生成四张图，返回 名称 -> 路径 的列表（失败/无 ggplot2 时返回空列表，不影响分析）
+make_figures <- function(out_sf, x, y, r2_values, coef_values) {
+  if (!HAS_GGPLOT) return(list())
+  targets <- list(
+    error_hist = fig_error_hist(x, y),
+    local_r2_hist = fig_r2_hist(r2_values),
+    coef_hist = fig_coef_hist(coef_values),
+    map_r2 = fig_map_r2(out_sf),
+    map_lme = fig_map_lme(out_sf)
+  )
+  paths <- list()
+  for (name in names(targets)) {
+    path <- file.path(OUT_DIR, paste0("fig_", name, ".png"))
+    if (isTRUE(save_fig(targets[[name]], path))) paths[[name]] <- path
+  }
+  paths
 }
 
 med <- function(v) {
@@ -136,11 +228,25 @@ compute <- function() {
   lmre_v     <- as.numeric(lv[[paste0("LMRE_",  yvar_r, "_", xvar_r)]])
   lrmse_v    <- as.numeric(lv[[paste0("LRMSE_", yvar_r, "_", xvar_r)]])
 
+  # 专题图用的 sf：投影后的有效要素 + 局部指标列（列名与绘图层一致）
+  fig_sf <- pop_valid
+  fig_sf$Local_R2 <- local_r2_v
+  fig_sf$Coeff    <- coef_v
+  fig_sf$LME      <- lme_v
+  # 四张图：误差直方图 / 局部 R² 直方图 / 系数直方图 / 专题图（R² 与 LME）
+  figures <- tryCatch(
+    make_figures(fig_sf, pop_valid[[xvar_r]], pop_valid[[yvar_r]], local_r2_v, coef_v),
+    error = function(e) list()
+  )
+
   # 对齐回原始要素顺序（被剔除的填 NA）
   align <- function(v) { out <- rep(NA_real_, n0); out[valid] <- v; out }
 
   list(
     gs = gs, bw = bw, dropped = dropped, n_valid = nrow(pop_valid),
+    # 全局诊断量（R² / 调整 R² / AICc）——结果页的指标卡要用到
+    diag = gr$GW.diagnostic,
+    figures = figures,
     pop = pop,  # 原始（未投影）要素，用于写出结果 SHP
     local_r2 = align(local_r2_v), coefficient = align(coef_v),
     local_corr = align(corr_v), lme = align(lme_v), lmae = align(lmae_v),
@@ -157,6 +263,9 @@ metrics <- list(
   mre         = sprintf("%.4f", r$gs[["MRE"]]),
   rmse        = sprintf("%.4f", r$gs[["RMSE"]]),
   correlation = sprintf("%.4f", r$gs[["Corr"]]),
+  r2          = fmt_diag(r$diag$gw.R2),
+  adj_r2      = fmt_diag(r$diag$gwR2.adj),
+  aicc        = fmt_diag(r$diag$AICc, 1),
   local_r2_median    = sprintf("%.4f", med(r$local_r2)),
   coefficient_median = sprintf("%.4f", med(r$coefficient)),
   local_corr_median  = sprintf("%.4f", med(r$local_corr)),
@@ -215,6 +324,10 @@ result <- list(
   local_values = local_values,
   columns = columns,
   output_shp = output_shp,
+  # 结果页要显示输出目录、并支持「打开结果目录」，必须显式带出来
+  output_dir = OUT_DIR,
+  # 四张图的路径，结果页据此填充图表页签
+  figures = r$figures,
   config = config
 )
 

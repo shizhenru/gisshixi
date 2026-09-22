@@ -55,11 +55,21 @@ QLabel#BrandSubtitle, QLabel#Muted {
     color: #7b8b8e;
     font-size: 10px;
 }
+QLabel#PanelNote {
+    color: #7b8b8e;
+    font-size: 10px;
+}
 QLabel#Kicker {
     color: #2d8c7c;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 1px;
+}
+/* 表单字段名：比 Muted 更实一点，避免整列看着发灰 */
+QLabel#FieldLabel {
+    color: #5d7176;
+    font-size: 11px;
+    font-weight: 600;
 }
 QLabel#PageTitle {
     color: #26363c;

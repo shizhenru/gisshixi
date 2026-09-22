@@ -14,6 +14,10 @@ from ..theme import APP_STYLE
 from .histogram_canvas import HistogramCanvas
 from .scatter_canvas import ScatterCanvas
 
+# 属性表页签最多预览的行数：逐行建 QTableWidgetItem 与行数成正比，
+# 185876 行 × 5 字段要 2.6 秒，且超出部分本来也无法浏览。
+_TABLE_PREVIEW_ROWS = 5000
+
 
 class ChartWindow(QWidget):
     """独立图表窗口：散点图（X/Y 两字段）+ 直方图（单字段）。"""
@@ -81,6 +85,9 @@ class ChartWindow(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
+        self.table_hint = QLabel("")
+        self.table_hint.setObjectName("Muted")
+        lay.addWidget(self.table_hint)
         self.data_table = QTableWidget(0, 0)
         self.data_table.setSortingEnabled(True)
         self.data_table.setAlternatingRowColors(True)
@@ -146,12 +153,19 @@ class ChartWindow(QWidget):
         self.histogram_canvas.set_data(self._values[field], field)
 
     def _render_table(self):
+        # 表格只作数据预览：逐行建 QTableWidgetItem 的代价与行数成正比，
+        # 十几万行的栅格转面数据要建 2 秒以上，且这个行列数也没法浏览，故截断。
         self.data_table.setSortingEnabled(False)
         self.data_table.clear()
         self.data_table.setRowCount(0)
         self.data_table.setColumnCount(len(self._fields))
         self.data_table.setHorizontalHeaderLabels(self._fields)
-        row_count = max((len(values) for values in self._values.values()), default=0)
+        total = max((len(values) for values in self._values.values()), default=0)
+        row_count = min(total, _TABLE_PREVIEW_ROWS)
+        if total > row_count:
+            self.table_hint.setText(f"共 {total:,} 行，仅预览前 {row_count:,} 行")
+        else:
+            self.table_hint.setText("")
         self.data_table.setRowCount(row_count)
         for row_index in range(row_count):
             for column_index, field in enumerate(self._fields):

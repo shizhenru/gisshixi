@@ -175,6 +175,8 @@ class ResultsPage(QWidget):
         self.geometry_image_labels = {}
         self.geometry_tab_indices = []
         self._geometry_paths = {}
+        self.figure_labels = {}      # 属性模式：误差/局部R²/系数直方图 + 专题图
+        self._figure_paths = {}
         self._build()
 
     def _build(self):
@@ -199,18 +201,20 @@ class ResultsPage(QWidget):
 
     def _global_summary_panel(self):
         panel, body = panel_box("GLOBAL MODEL", "全局模型摘要")
-        row = QHBoxLayout()
-        row.setSpacing(10)
+        # 用网格而非单行：8 张卡一行放不下会被右边缘截断，这里每行 4 张自动换行
+        # （与下面「局部统计摘要」的排法保持一致）
+        grid = QGridLayout()
+        grid.setSpacing(8)
         metrics = [
             ("R²", "—"), ("调整 R²", "—"), ("AICc", "—"), ("最优带宽", "—"),
             ("ME", "—"), ("MAE", "—"), ("RMSE", "—"), ("相关系数", "—"),
         ]
-        for title, value in metrics:
+        for index, (title, value) in enumerate(metrics):
             card = MetricCard(title, value, "暂无结果")
             self.metric_cards[title] = card
             self.metric_card_widgets.append(card)
-            row.addWidget(card)
-        body.addLayout(row)
+            grid.addWidget(card, index // 4, index % 4)
+        body.addLayout(grid)
         return panel
 
     def _local_summary_panel(self):
@@ -251,10 +255,30 @@ class ResultsPage(QWidget):
         self.scatter_label.doubleClicked.connect(self._open_scatter_preview)
         scatter_layout.addWidget(self.scatter_label)
         self.chart_tabs.addTab(scatter_page, "散点图")
-        for name in ["误差直方图", "局部 R² 直方图", "系数直方图", "专题图"]:
-            placeholder = QLabel("该图表暂未生成")
-            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.chart_tabs.addTab(placeholder, name)
+        # 四类图由属性 GWR 在 R 端生成（gwr_attribute.R 的 make_figures），
+        # 路径经 artifacts 传回；专题图一张页签里放 R² 与 LME 两幅。
+        for name, keys in (
+            ("误差直方图", ("error_hist",)),
+            ("局部 R² 直方图", ("local_r2_hist",)),
+            ("系数直方图", ("coef_hist",)),
+            ("专题图", ("map_r2", "map_lme")),
+        ):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(8, 8, 8, 8)
+            page_layout.setSpacing(8)
+            for key in keys:
+                label = ClickableImageLabel("运行分析后这里会显示图件")
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                label.setMinimumHeight(240)
+                label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                label.setStyleSheet(
+                    "background: #ffffff; border: 1px solid #dfe8e6; border-radius: 6px;"
+                )
+                label.doubleClicked.connect(lambda k=key: self._open_figure_preview(k))
+                page_layout.addWidget(label, 1)
+                self.figure_labels[key] = label
+            self.chart_tabs.addTab(page, name)
         table_page = QWidget()
         table_layout = QVBoxLayout(table_page)
         table_layout.setContentsMargins(8, 8, 8, 8)
@@ -333,9 +357,12 @@ class ResultsPage(QWidget):
             if index < len(titles):
                 card.set_title(titles[index])
                 self.metric_cards[titles[index]] = card
+        # 属性模式的四张卡（R² / 调整 R² / AICc / 最优带宽）此前没有映射，
+        # 导致算法返回了值、界面上却一直显示「—」。多余键在其它模式下取不到卡片、会被跳过。
         metric_names = {
             "ME": "me", "MAE": "mae", "MRE": "mre", "RMSE": "rmse",
             "相关系数": "correlation", "有效像元": "valid_cells",
+            "R²": "r2", "调整 R²": "adj_r2", "AICc": "aicc", "最优带宽": "bandwidth",
         }
         if is_geometry:
             metric_names = {
@@ -362,11 +389,14 @@ class ResultsPage(QWidget):
             result.artifacts.get("scatter", result.artifacts.get("raster_scatter", "")),
         )
         self._refresh_scatter_image()
+        self._refresh_figure_tabs(result)
         if self._scatter_preview is not None and self._scatter_preview.isVisible():
             self._scatter_preview.set_image(self._scatter_path)
         artifact_paths = list(result.artifacts.values())
         if artifact_paths:
-            visible_paths = [path for path in artifact_paths if Path(path).suffix.lower() in {".png", ".csv", ".json", ".md", ".tif", ".tiff"}]
+            # .shp 也要列出来：属性 GWR 的主要产物就是结果 SHP，此前被后缀白名单滤掉了
+            visible_paths = [path for path in artifact_paths
+                             if Path(path).suffix.lower() in {".png", ".csv", ".json", ".md", ".tif", ".tiff", ".shp"}]
             self.artifacts_text.setText("输出文件：\n" + "\n".join(visible_paths))
         elif result.output_dir:
             self.artifacts_text.setText(f"输出目录：{result.output_dir}")
@@ -451,6 +481,25 @@ class ResultsPage(QWidget):
                 self.pairwise_table.setItem(row_index, column_index, QTableWidgetItem(str(value) if value is not None else ""))
         self.pairwise_table.resizeColumnsToContents()
         self.pairwise_table.setSortingEnabled(True)
+
+    def _refresh_figure_tabs(self, result):
+        """把属性 GWR 生成的图件填进对应页签；其它模式没有这些产物则提示未生成。"""
+        for key, label in self.figure_labels.items():
+            path = result.artifacts.get(key, "")
+            self._figure_paths[key] = path
+            self._set_image_label(label, path, "本次分析未生成该图件")
+
+    def _open_figure_preview(self, key):
+        path = self._figure_paths.get(key, "")
+        if not path or not Path(path).exists():
+            return
+        if self._scatter_preview is None:
+            self._scatter_preview = ScatterPreviewDialog(path, self)
+        else:
+            self._scatter_preview.set_image(path)
+        self._scatter_preview.show()
+        self._scatter_preview.raise_()
+        self._scatter_preview.activateWindow()
 
     def _refresh_geometry_images(self, result):
         self._geometry_paths = {}
@@ -566,5 +615,7 @@ class ResultsPage(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._refresh_scatter_image()
+        for key, label in self.figure_labels.items():
+            self._set_image_label(label, self._figure_paths.get(key, ""), "本次分析未生成该图件")
         for key, label in self.geometry_image_labels.items():
             self._set_image_label(label, self._geometry_paths.get(key, ""), "本次分析未生成该图件")

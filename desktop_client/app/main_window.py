@@ -292,7 +292,8 @@ class SpatialValidationWindow(QMainWindow):
             # 自动加载结果 SHP 到地图，方便直接分层设色查看
             output_shp = getattr(result, "output_shp", "") or ""
             if output_shp and Path(output_shp).exists():
-                self.workbench_page.load_shp(output_shp, reset_xy=True)
+                # 属性表已由 _show_results 填入带 GWR 结果列的内容，别被原始字段表覆盖
+                self.workbench_page.load_shp(output_shp, reset_xy=True, fill_table=False)
             self.set_status(f"分析完成：{result.engine}")
 
     def _render_scatter_for_result(self, result):

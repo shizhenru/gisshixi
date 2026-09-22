@@ -23,10 +23,12 @@ def clear_layout(layout):
             clear_layout(child_layout)
 
 
-def panel_box(kicker: str, title: str, right_text: str = "", scrollable: bool = False):
+def panel_box(kicker: str, title: str, right_text: str = "", scrollable: bool = False,
+              compact: bool = False):
     """返回 (panel_frame, body_layout)：带标题栏和分隔线的白色面板。
 
     scrollable=True 时，body 会被包进一个 QScrollArea（用于收纳较长的参数面板）。
+    compact=True 时标题压成一行、边距收紧，用于给同列的其他控件让出高度。
     """
     frame = QFrame()
     frame.setObjectName("Panel")
@@ -34,20 +36,27 @@ def panel_box(kicker: str, title: str, right_text: str = "", scrollable: bool = 
     root.setContentsMargins(0, 0, 0, 0)
     root.setSpacing(0)
     header = QHBoxLayout()
-    header.setContentsMargins(18, 14, 18, 12)
-    labels = QVBoxLayout()
-    labels.setSpacing(3)
     kicker_label = QLabel(kicker)
     kicker_label.setObjectName("Kicker")
     title_label = QLabel(title)
     title_label.setObjectName("PanelTitle")
-    labels.addWidget(kicker_label)
-    labels.addWidget(title_label)
-    header.addLayout(labels)
+    if compact:
+        header.setContentsMargins(18, 8, 18, 7)
+        header.setSpacing(8)
+        header.addWidget(kicker_label)
+        header.addWidget(title_label)
+    else:
+        header.setContentsMargins(18, 14, 18, 12)
+        labels = QVBoxLayout()
+        labels.setSpacing(3)
+        labels.addWidget(kicker_label)
+        labels.addWidget(title_label)
+        header.addLayout(labels)
     header.addStretch()
     if right_text:
+        # objectName 用 PanelNote 而非 Muted：样式等价，但外部可据此拿到这个标签做动态更新
         right = QLabel(right_text)
-        right.setObjectName("Muted")
+        right.setObjectName("PanelNote")
         header.addWidget(right)
     root.addLayout(header)
     separator = QFrame()
@@ -55,8 +64,12 @@ def panel_box(kicker: str, title: str, right_text: str = "", scrollable: bool = 
     separator.setStyleSheet("color: #edf1f1;")
     root.addWidget(separator)
     body = QVBoxLayout()
-    body.setContentsMargins(18, 12, 18, 17)
-    body.setSpacing(10)
+    if compact:
+        body.setContentsMargins(18, 8, 18, 10)
+        body.setSpacing(5)
+    else:
+        body.setContentsMargins(18, 12, 18, 17)
+        body.setSpacing(10)
     if scrollable:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

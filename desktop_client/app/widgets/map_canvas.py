@@ -5,6 +5,7 @@ from ..qt_compat import (
     QImage,
     QObject,
     QPainter,
+    QPainterPath,
     QPen,
     QPolygonF,
     QPointF,
@@ -19,6 +20,14 @@ from ..qt_compat import (
 )
 from .data_select import MIME_SOURCE_PATH
 from .raster_preview import RasterLoadWorker
+from .vector_render import build_polygon_path, decimate_ring
+
+# 矢量缓存图长边上限（物理像素）：过大既费内存又拖慢光栅化
+_VECTOR_CACHE_MAX = 6000
+
+# 缓存超采样倍数：按当前视图的 1.5 倍出图，缩小显示时是降采样（更锐），
+# 放大到 1.5 倍以内也不必重绘，把「中间缩放档会发糊」的区间从 1~2 倍压到 1.5~2 倍
+_VECTOR_CACHE_HEADROOM = 1.5
 
 
 class MapCanvas(QWidget):
@@ -46,7 +55,7 @@ class MapCanvas(QWidget):
         self._points = []
         self._polygon_feature_ids = []
         self._feature_fills = []
-        self._highlight_index = None
+        self._highlight_indices = frozenset()
         self._press_pos = None
         self._raster_image = QImage()
         self._raster_loading = False
@@ -54,13 +63,19 @@ class MapCanvas(QWidget):
         self._raster_seq = 0
         self._vector_image = QImage()
         self._vector_cache_scale = 0.0
+        self._loading_text = ""
+
+    def set_loading(self, loading: bool, text: str = ""):
+        """显示 / 清除「加载中」占位：后台解析矢量期间给用户反馈，避免看起来像卡死。"""
+        self._loading_text = text if loading else ""
+        self.update()
 
     def load_shapes(self, geometry_data: dict):
         """加载真实几何数据用于渲染（shapefile 等）。"""
         self.shapes = geometry_data.get("geometries", [])
         self.data_bbox = geometry_data.get("bbox")
         self._feature_fills = []
-        self._highlight_index = None
+        self._highlight_indices = frozenset()
         self._raster_image = QImage()
         self._raster_loading = False
         self._raster_error = ""
@@ -78,7 +93,7 @@ class MapCanvas(QWidget):
         self._points = []
         self._polygon_feature_ids = []
         self._feature_fills = []
-        self._highlight_index = None
+        self._highlight_indices = frozenset()
         self._raster_image = QImage()
         self._vector_image = QImage()
         self._vector_cache_scale = 0.0
@@ -120,6 +135,7 @@ class MapCanvas(QWidget):
     def clear(self):
         """清空已加载的数据（矢量与栅格），回到空白占位状态。"""
         self._raster_seq += 1
+        self._loading_text = ""
         self.shapes = []
         self.data_bbox = None
         self._polygons = []
@@ -127,7 +143,7 @@ class MapCanvas(QWidget):
         self._points = []
         self._polygon_feature_ids = []
         self._feature_fills = []
-        self._highlight_index = None
+        self._highlight_indices = frozenset()
         self._raster_image = QImage()
         self._vector_image = QImage()
         self._vector_cache_scale = 0.0
@@ -143,13 +159,25 @@ class MapCanvas(QWidget):
         self._vector_cache_scale = 0.0
         self.update()
 
-    def highlight_feature(self, index):
-        """高亮指定要素索引（index 与 self.shapes 对齐），None 表示取消。"""
-        self._highlight_index = index
+    def highlight_features(self, indices):
+        """高亮若干要素（索引与 self.shapes 对齐）。传 None / 空表示取消高亮。
+
+        支持多要素是为了与属性表多选联动：属性表里选中几行，地图上对应的区域一起高亮。
+        """
+        if indices is None:
+            self._highlight_indices = frozenset()
+        elif isinstance(indices, int):
+            self._highlight_indices = frozenset((indices,))
+        else:
+            self._highlight_indices = frozenset(indices)
         self.update()
 
     def _build_cache(self):
-        """把世界坐标几何预转为 QPolygonF / QPointF，并对大面要素抽稀以加速渲染。"""
+        """把世界坐标几何预转为 QPolygonF / QPointF，并对大面要素抽稀以加速渲染。
+
+        同一要素的所有环（外环 + 若干洞）拼进同一个 QPolygonF，配合奇偶填充规则镂空：
+        逐环单独绘制会把洞一起填实，使带洞的大面（栅格转面数据常见）盖住洞里的小块。
+        """
         self._polygons = []
         self._polylines = []
         self._points = []
@@ -157,12 +185,12 @@ class MapCanvas(QWidget):
         for fid, shape in enumerate(self.shapes):
             kind = shape.get("type")
             if kind == "polygon":
-                for ring in shape.get("rings", []):
-                    poly = QPolygonF([QPointF(x, y) for x, y in ring])
-                    if poly.size() > 300:
-                        poly = self._decimate(poly, 2)
-                    self._polygons.append(poly)
-                    self._polygon_feature_ids.append(fid)
+                path = build_polygon_path(shape.get("rings", []))
+                if path is None:
+                    continue
+                # 一个要素一条路径：外环 + 各洞是独立子路径，按奇偶规则镂空，不依赖环的绕向
+                self._polygons.append(path)
+                self._polygon_feature_ids.append(fid)
             elif kind == "polyline":
                 for part in shape.get("parts", []):
                     self._polylines.append(QPolygonF([QPointF(x, y) for x, y in part]))
@@ -171,17 +199,6 @@ class MapCanvas(QWidget):
             elif kind == "multipoint":
                 for p in shape.get("points", []):
                     self._points.append(QPointF(*p))
-
-    @staticmethod
-    def _decimate(poly: QPolygonF, step: int) -> QPolygonF:
-        """每 step 个点取一个（保留首尾），降低大面要素的渲染点密度。"""
-        n = poly.size()
-        if n <= step:
-            return poly
-        indices = list(range(0, n, step))
-        if indices[-1] != n - 1:
-            indices.append(n - 1)
-        return QPolygonF([poly[i] for i in indices])
 
     def _fit(self, rect):
         xmin, ymin, xmax, ymax = self.data_bbox
@@ -207,8 +224,10 @@ class MapCanvas(QWidget):
         if not self.shapes or not self.data_bbox:
             return None
         wp = self._screen_to_world(pos)
-        for i, poly in enumerate(self._polygons):
-            if poly.containsPoint(wp, Qt.FillRule.OddEvenFill):
+        # 倒序取最后一个命中的：绘制是正序、后画的盖在上面，这样点到的才是看到的那块。
+        # 洞已按奇偶规则镂空，落在洞里的点不会被外层大面误判命中。
+        for i in range(len(self._polygons) - 1, -1, -1):
+            if self._polygons[i].contains(wp):
                 if i < len(self._polygon_feature_ids):
                     return self._polygon_feature_ids[i]
                 return None
@@ -229,9 +248,11 @@ class MapCanvas(QWidget):
         world_h = ymax - ymin
         if world_w <= 0 or world_h <= 0:
             return
-        # 分辨率以当前视图比例为准，长边最多 6000 像素，避免深缩放生成超大图。
-        scale = self._scale
-        max_scale = 6000 / max(world_w, world_h)
+        # 分辨率以当前视图比例为准，长边最多 _VECTOR_CACHE_MAX 像素，避免深缩放生成超大图。
+        # 必须乘以设备像素比：rect() 是逻辑像素，实际帧缓冲是 dpr 倍物理像素，
+        # 按逻辑像素渲染会被系统放大，HiDPI（如 150% 缩放）下小地图一开就是糊的。
+        scale = self._scale * self.devicePixelRatioF() * _VECTOR_CACHE_HEADROOM
+        max_scale = _VECTOR_CACHE_MAX / max(world_w, world_h)
         if scale > max_scale:
             scale = max_scale
         if scale <= 0:
@@ -255,7 +276,8 @@ class MapCanvas(QWidget):
                 color = self._feature_fills[fid] or default_fill
             painter.setPen(outline)
             painter.setBrush(QBrush(color))
-            painter.drawPolygon(poly)
+            # 路径按奇偶规则镂空洞：逐环填实会让带洞的大面盖住洞里的小块
+            painter.drawPath(poly)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         line_pen = QPen(QColor("#e78338"))
         line_pen.setCosmetic(True)
@@ -288,7 +310,10 @@ class MapCanvas(QWidget):
         transform = QTransform(scale, 0, 0, -scale, cx - self._center_x * scale, cy + self._center_y * scale)
 
         # 光栅化缓存失效（未渲染 / 颜色变化 / 放大超过 2 倍）时重绘，否则直接贴图。
-        if self._vector_image.isNull() or self._vector_cache_scale <= 0 or scale > self._vector_cache_scale * 2.0:
+        # 比较用物理像素密度，与 _render_vector_cache 内部口径一致。
+        pixel_scale = scale * self.devicePixelRatioF() * _VECTOR_CACHE_HEADROOM
+        if (self._vector_image.isNull() or self._vector_cache_scale <= 0
+                or pixel_scale > self._vector_cache_scale * 2.0):
             self._render_vector_cache()
 
         if not self._vector_image.isNull():
@@ -299,7 +324,7 @@ class MapCanvas(QWidget):
             painter.drawImage(QRectF(top_left, bottom_right), self._vector_image)
 
         # 高亮要素叠加绘制：不重绘整层，只画命中要素。
-        if self._highlight_index is not None:
+        if self._highlight_indices:
             painter.save()
             painter.setTransform(transform)
             hl = QPen(QColor("#f5a623"))
@@ -309,15 +334,17 @@ class MapCanvas(QWidget):
             painter.setBrush(QBrush(QColor("#f5d08a")))
             for i, poly in enumerate(self._polygons):
                 fid = self._polygon_feature_ids[i] if i < len(self._polygon_feature_ids) else -1
-                if fid == self._highlight_index:
-                    painter.drawPolygon(poly)
+                if fid in self._highlight_indices:
+                    painter.drawPath(poly)
             painter.restore()
 
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
         rect = self.rect().adjusted(1, 1, -1, -1)
-        if self._raster_loading:
+        if self._loading_text:
+            self._paint_placeholder(painter, rect, self._loading_text)
+        elif self._raster_loading:
             self._paint_placeholder(painter, rect, "栅格加载中…")
         elif self._raster_error:
             self._paint_placeholder(painter, rect, f"栅格打开失败：{self._raster_error}", error=True)
