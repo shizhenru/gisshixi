@@ -868,8 +868,15 @@ class WorkbenchPage(QWidget):
         path_b = self.geometry_b_combo.currentData()
         field_a = self.geometry_a_field_combo.currentText()
         field_b = self.geometry_b_field_combo.currentText()
-        values_a = sorted(read_unique_values(path_a, field_a), key=self._value_sort_key) if path_a and field_a else []
-        values_b = sorted(read_unique_values(path_b, field_b), key=self._value_sort_key) if path_b and field_b else []
+        try:
+            values_a = sorted(read_unique_values(path_a, field_a), key=self._value_sort_key) if path_a and field_a else []
+            values_b = sorted(read_unique_values(path_b, field_b), key=self._value_sort_key) if path_b and field_b else []
+        except Exception as exc:  # noqa: BLE001
+            self.geometry_mapping_table.setRowCount(0)
+            self.statusMessage.emit(f"类别值读取失败：{exc}")
+            return
+        if path_a and field_a and path_b and field_b and not values_a and not values_b:
+            self.statusMessage.emit("未读取到类别值，请确认 SHP 的 DBF 文件存在且类别字段有值")
         common = sorted(set(values_a) & set(values_b), key=self._value_sort_key)
         rest_a = [value for value in values_a if value not in common]
         rest_b = [value for value in values_b if value not in common]
