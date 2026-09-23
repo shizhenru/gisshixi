@@ -80,6 +80,9 @@ class AnalysisResult:
     local_values: list[float] = field(default_factory=list)
     local_columns: dict = field(default_factory=dict)
     pairwise_metrics: dict = field(default_factory=dict)
+    raster_names: list[str] = field(default_factory=list)
+    raster_display_names: list[str] = field(default_factory=list)
+    local_statistics: dict = field(default_factory=dict)
     output_shp: str = ""
     output_dir: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)

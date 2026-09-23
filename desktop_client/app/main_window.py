@@ -337,7 +337,13 @@ class SpatialValidationWindow(QMainWindow):
         )
         if path:
             export_report(path, {
+                "engine": self.latest_result.engine,
+                "status": self.latest_result.status,
                 "metrics": self.latest_result.metrics,
+                "pairwise_metrics": self.latest_result.pairwise_metrics,
+                "local_statistics": self.latest_result.local_statistics,
+                "raster_names": self.latest_result.raster_names,
+                "raster_display_names": self.latest_result.raster_display_names,
                 "message": self.latest_result.message,
             }, self.latest_parameters)
             self.set_status(f"报告已导出：{Path(path).name}")

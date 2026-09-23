@@ -3,17 +3,15 @@ setlocal
 set "QT_ENABLE_HIGHDPI_SCALING=1"
 cd /d "%~dp0"
 
-if exist "%~dp0.venv\Scripts\python.exe" (
-  set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
-) else if defined SPATIAL_VALIDATION_PYTHON (
-  set "PYTHON_EXE=%SPATIAL_VALIDATION_PYTHON%"
+if exist "%~dp0..\.venv\Scripts\python.exe" (
+  set "PYTHON_EXE=%~dp0..\.venv\Scripts\python.exe"
 ) else (
   echo [ERROR] Project virtual environment was not found:
-  echo         %~dp0.venv\Scripts\python.exe
+  echo         %~dp0..\.venv\Scripts\python.exe
   echo.
   echo Create it from this folder with:
   echo   python -m venv .venv
-  echo   .venv\Scripts\python.exe -m pip install -r requirements.txt
+  echo   .venv\Scripts\python.exe -m pip install -r desktop_client\requirements.txt
   echo.
   pause
   exit /b 1

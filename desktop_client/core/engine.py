@@ -52,6 +52,9 @@ class AnalysisEngine:
                     output_path=str(output_path),
                     local_values=payload.get("local_values", []),
                     pairwise_metrics=payload.get("pairwise_metrics", {}),
+                    raster_names=payload.get("raster_names", []),
+                    raster_display_names=payload.get("raster_display_names", []),
+                    local_statistics=payload.get("local_statistics", {}),
                     output_dir=payload.get("output_dir", ""),
                     artifacts=payload.get("artifacts", {}),
                 )

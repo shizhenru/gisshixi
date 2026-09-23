@@ -1,5 +1,6 @@
 """结果与报告页：全局/局部摘要 + 图表 + 分析报告。"""
 import csv
+import math
 import os
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from ...qt_compat import (
     Signal,
 )
 from ...widgets import MetricCard, panel_box
+from core.io.exporters import build_report_text
 from core.models import AnalysisResult
 
 
@@ -162,6 +164,8 @@ class ResultsPage(QWidget):
         self.report_text = None
         self.metric_cards = {}
         self.metric_card_widgets = []
+        self.raster_identity_cards = []
+        self.raster_identity_layout = None
         self.artifacts_text = None
         self.chart_tabs = None
         self.scatter_label = None
@@ -177,6 +181,7 @@ class ResultsPage(QWidget):
         self._geometry_paths = {}
         self.figure_labels = {}      # 属性模式：误差/局部R²/系数直方图 + 专题图
         self._figure_paths = {}
+        self.raster_pair_pages = []
         self._build()
 
     def _build(self):
@@ -201,6 +206,11 @@ class ResultsPage(QWidget):
 
     def _global_summary_panel(self):
         panel, body = panel_box("GLOBAL MODEL", "全局模型摘要")
+        self.global_panel = panel
+        identity_grid = QGridLayout()
+        identity_grid.setSpacing(8)
+        self.raster_identity_layout = identity_grid
+        body.addLayout(identity_grid)
         # 用网格而非单行：8 张卡一行放不下会被右边缘截断，这里每行 4 张自动换行
         # （与下面「局部统计摘要」的排法保持一致）
         grid = QGridLayout()
@@ -216,6 +226,15 @@ class ResultsPage(QWidget):
             grid.addWidget(card, index // 4, index % 4)
         body.addLayout(grid)
         return panel
+
+    @staticmethod
+    def _raster_label(index):
+        value = index + 1
+        label = ""
+        while value:
+            value, remainder = divmod(value - 1, 26)
+            label = chr(65 + remainder) + label
+        return label
 
     def _local_summary_panel(self):
         panel, body = panel_box("LOCAL SUMMARY", "局部统计摘要")
@@ -298,7 +317,7 @@ class ResultsPage(QWidget):
         self.pairwise_table.setSortingEnabled(True)
         self.pairwise_table.setMinimumHeight(420)
         table_layout.addWidget(self.pairwise_table)
-        self.chart_tabs.addTab(table_page, "数据表格")
+        self.chart_tabs.addTab(table_page, "总体对比")
         geometry_specs = [
             ("figure_polygon_iou", "面 IoU"),
             ("figure_centroid_distance_m", "质心距离"),
@@ -353,7 +372,7 @@ class ResultsPage(QWidget):
         geometry_titles = ["类别数", "候选对", "推荐阈值", "推荐阈值匹配对"]
         titles = geometry_titles if is_geometry else raster_titles if is_raster else attribute_titles
         for index, card in enumerate(self.metric_card_widgets):
-            card.setVisible(index < len(titles))
+            card.setVisible(not is_raster and index < len(titles))
             if index < len(titles):
                 card.set_title(titles[index])
                 self.metric_cards[titles[index]] = card
@@ -374,14 +393,24 @@ class ResultsPage(QWidget):
             if card is not None:
                 value = result.metrics.get(key, result.metrics.get(title, "—"))
                 card.update_value(value, result.engine)
-        self.local_summary_panel.setVisible(not is_geometry)
+        self.local_summary_panel.setVisible(not is_geometry and not is_raster)
+        self._refresh_raster_identity_cards(result, is_raster)
+        title = self.global_panel.findChild(QLabel, "PanelTitle")
+        kicker = self.global_panel.findChild(QLabel, "Kicker")
+        if title is not None:
+            title.setText("影像编号" if is_raster else "全局模型摘要")
+        if kicker is not None:
+            kicker.setText("RASTER INPUTS" if is_raster else "GLOBAL MODEL")
         for key, (label, prefix) in self.local_labels.items():
             value = result.metrics.get(key, "—")
             label.setText(str(value))
-        self._set_geometry_mode(is_geometry)
+        self._set_geometry_mode(is_geometry, is_raster)
         if is_geometry:
             self._refresh_geometry_table_choices(result)
             self._refresh_geometry_images(result)
+        elif is_raster:
+            self._refresh_raster_pair_tables(result)
+            self._refresh_pairwise_table(result)
         else:
             self._refresh_pairwise_table(result)
         self._scatter_path = result.artifacts.get(
@@ -400,13 +429,6 @@ class ResultsPage(QWidget):
             self.artifacts_text.setText("输出文件：\n" + "\n".join(visible_paths))
         elif result.output_dir:
             self.artifacts_text.setText(f"输出目录：{result.output_dir}")
-        pairwise_note = ""
-        if result.pairwise_metrics:
-            pairwise_note = "\n两两比较：\n" + "\n".join(
-                f"{key}: 有效像元 {values.get('valid_cells', '—')}，"
-                f"RMSE {values.get('rmse', '—')}，相关系数 {values.get('correlation', '—')}"
-                for key, values in result.pairwise_metrics.items()
-            )
         report_path = result.artifacts.get("report", "") if is_geometry else ""
         if report_path and Path(report_path).exists():
             try:
@@ -414,19 +436,137 @@ class ResultsPage(QWidget):
             except OSError:
                 self.report_text.setPlainText(result.message)
         else:
-            self.report_text.setPlainText(
-                f"执行引擎：{result.engine}\n任务状态：{result.status}\n运行信息：{result.message}\n"
-                f"输出目录：{result.output_dir or '—'}{pairwise_note}"
-            )
+            self.report_text.setPlainText(build_report_text(
+                {
+                    "engine": result.engine,
+                    "status": result.status,
+                    "metrics": result.metrics,
+                    "pairwise_metrics": result.pairwise_metrics,
+                    "local_statistics": result.local_statistics,
+                    "message": result.message,
+                },
+                {
+                    "engine": result.engine,
+                    "status": result.status,
+                    "output_dir": result.output_dir or "—",
+                },
+            ))
 
-    def _set_geometry_mode(self, enabled):
+    def _set_geometry_mode(self, enabled, is_raster=False):
         self.geometry_table_combo.setVisible(enabled)
+        self._clear_raster_pair_tables()
         for index in range(5):
-            self.chart_tabs.setTabVisible(index, not enabled)
-        self.chart_tabs.setTabVisible(5, True)
+            visible = not enabled and (not is_raster or index == 0)
+            self.chart_tabs.setTabVisible(index, visible)
+        self.chart_tabs.setTabVisible(5, not enabled)
         for index in self.geometry_tab_indices:
             self.chart_tabs.setTabVisible(index, enabled)
-        self.chart_tabs.setCurrentIndex(self.geometry_tab_indices[0] if enabled else 0)
+        self.chart_tabs.setCurrentIndex(self.geometry_tab_indices[0] if enabled else (0 if is_raster else 0))
+
+    def _clear_raster_pair_tables(self):
+        for page in self.raster_pair_pages:
+            index = self.chart_tabs.indexOf(page)
+            if index >= 0:
+                self.chart_tabs.removeTab(index)
+            page.deleteLater()
+        self.raster_pair_pages = []
+
+    def _refresh_raster_identity_cards(self, result, enabled):
+        names = result.raster_names if enabled else []
+        display_names = result.raster_display_names if enabled else []
+        while len(self.raster_identity_cards) < len(names):
+            index = len(self.raster_identity_cards)
+            card = MetricCard(f"影像 {self._raster_label(index)}", "—", "暂无结果")
+            self.raster_identity_cards.append(card)
+            self.raster_identity_layout.addWidget(card, index // 4, index % 4)
+        for index, card in enumerate(self.raster_identity_cards):
+            visible = index < len(names)
+            card.setVisible(visible)
+            if visible:
+                card.set_title(f"影像 {self._raster_label(index)}")
+                display_name = display_names[index] if index < len(display_names) else names[index]
+                card.update_value(Path(str(display_name)).name, result.engine)
+
+    def _refresh_raster_pair_tables(self, result):
+        self._clear_raster_pair_tables()
+        names = result.raster_names
+        name_labels = {name: self._raster_label(index) for index, name in enumerate(names)}
+        stats_labels = {
+            "local_r2": "局部 R²",
+            "coefficient": "回归系数",
+            "local_corr": "局部相关系数",
+            "lme": "LME",
+            "lmae": "LMAE",
+            "lmre": "LMRE",
+            "lrmse": "LRMSE",
+        }
+        headers = ["局部指标", "有效数", "最小值", "Q1", "中位数", "Q3", "最大值", "均值", "标准差"]
+        for pair_key, statistics in result.local_statistics.items():
+            left, _, right = pair_key.partition("__vs__")
+            title = f"{name_labels.get(left, left)}-{name_labels.get(right, right)}"
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(8, 8, 8, 8)
+            table = QTableWidget(0, len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.setAlternatingRowColors(True)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            table.setSortingEnabled(True)
+            table.setMinimumHeight(420)
+            rows = []
+            for key, label in stats_labels.items():
+                values = statistics.get(key, {}) or {}
+                if not self._has_statistic_values(values):
+                    continue
+                rows.append([
+                    label,
+                    values.get("count", "—"), values.get("min", "—"),
+                    values.get("q1", "—"), values.get("median", "—"),
+                    values.get("q3", "—"), values.get("max", "—"),
+                    values.get("mean", "—"), values.get("sd", "—"),
+                ])
+            table.setRowCount(len(rows))
+            for row_index, row in enumerate(rows):
+                for column_index, value in enumerate(row):
+                    table.setItem(row_index, column_index, QTableWidgetItem(self._format_statistic(value)))
+            table.resizeColumnsToContents()
+            page_layout.addWidget(table)
+            tab_index = self.chart_tabs.addTab(page, title)
+            self.chart_tabs.setTabToolTip(tab_index, f"{left} vs {right}")
+            self.raster_pair_pages.append(page)
+
+    @staticmethod
+    def _has_statistic_values(values):
+        if not isinstance(values, dict):
+            return False
+        count = ResultsPage._numeric_statistic_value(values.get("count"))
+        if count is not None and count <= 0:
+            return False
+        statistic_keys = ("min", "q1", "median", "q3", "max", "mean", "sd")
+        return any(
+            ResultsPage._numeric_statistic_value(values.get(key)) is not None
+            for key in statistic_keys
+        )
+
+    @staticmethod
+    def _numeric_statistic_value(value):
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _format_statistic(value):
+        number = ResultsPage._numeric_statistic_value(value)
+        if number is not None:
+            return f"{number:.6g}"
+        if value is None or str(value).strip().lower() in {"", "na", "nan", "none", "null", "—", "-"}:
+            return "—"
+        return str(value)
 
     def _refresh_geometry_table_choices(self, result):
         choices = [
