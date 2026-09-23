@@ -144,9 +144,36 @@ $env:SPATIAL_VALIDATION_PYTHON = "D:\path\to\gdal\python.exe"
 
 脚本会根据解释器目录设置 `PROJ_LIB` 和 `GDAL_DATA`。这对 `rasterio`、坐标转换和 GDAL 相关功能很重要。若使用普通虚拟环境，直接调用 `.venv\Scripts\python.exe main.py` 最稳定。
 
+### 首次安装与更新依赖
+
+每台电脑第一次拉取项目后，都需要在本地创建自己的 Python 虚拟环境；`.venv` 不会随 Git 同步。推荐直接双击：
+
+```text
+desktop_client\setup_client.bat
+```
+
+该脚本会自动创建 `desktop_client\.venv`，并根据 `desktop_client\requirements.txt` 安装或更新客户端依赖。安装完成后，双击：
+
+```text
+desktop_client\run_client.bat
+```
+
+即可启动桌面端。以后如果 `requirements.txt` 有新增或调整，重新运行一次 `setup_client.bat` 即可，不需要删除已有环境。
+
+也可以手动执行：
+
+```powershell
+Set-Location .\desktop_client
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+如果安装过程中提示网络或权限错误，请在当前终端确认可以访问 Python 包源，或在有网络的环境中执行安装。不要把 `.venv` 文件夹提交到 Git。
+
 ## 依赖
 
-桌面端的必需依赖位于 `desktop_client/requirements.txt`：
+桌面端的全部 Python 依赖位于 `desktop_client/requirements.txt`。当前清单覆盖 Qt 界面、SHP/GPKG 几何数据、投影转换、栅格处理、绘图、Excel 读取和几何算法所需组件，包括 `PyQt6`、`PySide6`、`geopandas`、`pyogrio`、`shapely`、`pyproj`、`rasterio`、`numpy`、`pandas`、`scipy`、`matplotlib` 和 `openpyxl`。安装方式见上面的“首次安装与更新依赖”。
 
 - Python 3.10 或更高版本
 - PyQt6

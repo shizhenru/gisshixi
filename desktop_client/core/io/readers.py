@@ -498,6 +498,16 @@ def read_unique_values(path: str | Path, field: str, limit: int = 500) -> list[s
         if values:
             return values
 
+        # DBF 编码、字段名大小写或第三方驱动异常时，使用 GeoPandas/Pyogrio 回退。
+        # 这只读取属性列，不读取几何，避免类别映射因可选驱动问题静默为空。
+        try:
+            import geopandas as gpd
+            frame = gpd.read_file(file_path, columns=[field], ignore_geometry=True)
+            if field in frame.columns:
+                return frame[field].dropna().astype(str).drop_duplicates().tolist()[:limit]
+        except Exception:
+            pass
+
     data = read_attributes(str(file_path), limit=0)
     if field in data["fields"]:
         index = data["fields"].index(field)
