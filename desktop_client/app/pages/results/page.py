@@ -512,7 +512,6 @@ class ResultsPage(QWidget):
             table.setAlternatingRowColors(True)
             table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            table.setSortingEnabled(True)
             table.setMinimumHeight(420)
             rows = []
             for key, label in stats_labels.items():
@@ -531,6 +530,7 @@ class ResultsPage(QWidget):
                 for column_index, value in enumerate(row):
                     table.setItem(row_index, column_index, QTableWidgetItem(self._format_statistic(value)))
             table.resizeColumnsToContents()
+            table.setSortingEnabled(True)
             page_layout.addWidget(table)
             tab_index = self.chart_tabs.addTab(page, title)
             self.chart_tabs.setTabToolTip(tab_index, f"{left} vs {right}")
