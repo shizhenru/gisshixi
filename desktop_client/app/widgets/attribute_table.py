@@ -12,7 +12,7 @@ from ..qt_compat import (
     Signal,
 )
 
-from .data_select import MIME_SOURCE_PATH
+from .data_select import MIME_RUN_INDEX, MIME_SOURCE_PATH
 
 _DISPLAY_ROLE = Qt.ItemDataRole.DisplayRole
 
@@ -78,27 +78,44 @@ class AttributeTableModel(QAbstractTableModel):
 
 
 class DroppableTableView(QTableView):
-    """可接收数据源拖放的虚拟属性表，拖入后发出 sourceDropped(路径)。"""
+    """可接收拖放的虚拟属性表。
+
+    拖数据源 → sourceDropped(路径)，只换表内容；拖项目 → runDropped(序号)，
+    交给主窗口切项目（与拖到地图上同一套处理）。
+    """
 
     sourceDropped = Signal(str)
+    runDropped = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
 
+    @staticmethod
+    def _accepts(mime) -> bool:
+        return mime.hasFormat(MIME_SOURCE_PATH) or mime.hasFormat(MIME_RUN_INDEX)
+
     def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(MIME_SOURCE_PATH):
+        if self._accepts(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat(MIME_SOURCE_PATH):
+        if self._accepts(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
+        if event.mimeData().hasFormat(MIME_RUN_INDEX):
+            raw = bytes(event.mimeData().data(MIME_RUN_INDEX)).decode("utf-8")
+            try:
+                self.runDropped.emit(int(raw))
+            except ValueError:
+                pass
+            event.acceptProposedAction()
+            return
         if event.mimeData().hasFormat(MIME_SOURCE_PATH):
             path = bytes(event.mimeData().data(MIME_SOURCE_PATH)).decode("utf-8")
             self.sourceDropped.emit(path)

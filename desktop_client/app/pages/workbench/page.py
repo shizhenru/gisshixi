@@ -52,9 +52,23 @@ from ...widgets.vector_loader import VectorLoadWorker
 from core.algorithms.python_runner import PythonRunner
 from core.algorithms.r_runner import RRunner
 from core.io.readers import read_attributes, read_unique_values
-from core.models import AnalysisParameters, AnalysisResult, RasterAnalysisParameters
+from core.models import (
+    AnalysisParameters,
+    AnalysisResult,
+    RasterAnalysisParameters,
+    attribute_pairs,
+    pair_key,
+    pair_label,
+    parse_pair_key,
+)
 from core.raster_processing import RasterPreprocessor
-from core.symbology import FIELD_INFO, auto_colors, categorical_colors, classify, classify_unique
+from core.symbology import (
+    auto_colors,
+    categorical_colors,
+    classify,
+    classify_unique,
+    pair_field_info,
+)
 
 
 class InfoIcon(QLabel):
@@ -95,6 +109,10 @@ class NoWheelComboBox(QComboBox):
 # 属性表按同一上限读取并逐行展示，保证表行与地图要素严格一一对应，联动高亮不会错位。
 _MAP_MAX_RECORDS = 200000
 
+# 散点图出图时的最大点数：点太多时按等间隔抽样。散点样式本来就是「看分布」，
+# 抽样不影响判读，却能把绘制与 hit-test 的代价压到常数级。
+_SCATTER_MAX_POINTS = 20000
+
 # 分层设色图例最多列出的类别数：面板不滚动，唯一值可能有几十类。
 _LEGEND_MAX_ITEMS = 30
 
@@ -104,6 +122,12 @@ _GAP_TIGHT = 4    # 标签与紧邻控件
 _GAP_ITEM = 6     # 组内控件之间
 _GAP_GROUP = 10   # 面板内分组之间
 _GAP_PANEL = 12   # 面板之间
+
+# 带宽探索里按配对返回的逐要素序列名（与 gwr_bandwidth.R 的 series 对齐）
+_BW_SERIES = (
+    "local_r2", "coefficient", "local_corr", "lme", "lmae", "lmre", "lrmse",
+    "residual", "stud_residual",
+)
 
 # 分层设色字段名 → 带宽探索逐带宽结果字段（与 gwr_attribute.R 写出的结果 SHP 字段对齐）
 _BANDWIDTH_FIELD_MAP = {
@@ -167,6 +191,8 @@ class WorkbenchPage(QWidget):
     runRequested = Signal(dict)
     resultDirectoryRequested = Signal()
     statusMessage = Signal(str)
+    # 项目被拖进地图 / 属性表：请求切到那个项目（由主窗口处理，项目列表归它管）
+    runDropped = Signal(int)
 
     def __init__(self, store, parent=None, rscript_path=""):
         super().__init__(parent)
@@ -192,7 +218,8 @@ class WorkbenchPage(QWidget):
         self._bw_slider_values = {}  # mode -> 最近一次滑块百分比
         self._bw_step_values = {}    # mode -> 最近一次百分比步长
         self._bw_baseline_cache = {}  # 数据基准缓存（栅格尺寸等）
-        self._bw_count_cache = {}     # (路径, X, Y) -> 有效样本数
+        self._bw_count_cache = {}     # (路径, 参与字段元组) -> 有效样本数
+        self._numeric_field_cache = {}  # 数据源路径 -> 数值字段名
         self._bw_extent_cache = {}    # (路径, 目标投影) -> 范围对角线（米）
         self._bandwidth_thread = None
         self._bandwidth_worker = None
@@ -205,12 +232,16 @@ class WorkbenchPage(QWidget):
         self._syncing_selection = False   # 防止地图 ↔ 属性表互相触发造成回环
         self._table_linked = False        # 属性表行序是否与地图要素一一对应
         self._map_path = None
+        # 属性分析用的源矢量（结果 SHP 只是它加了结果列后的副本，两者行序一致）
+        self._source_shp_path = ""
         self._map_geometry = None
         self._map_fields = []
         self._map_values = {}
         self._vector_load_seq = 0      # 矢量加载请求序号，用于丢弃过期结果
         self._pending_reset_xy = True
         self._pending_fill_table = True
+        self._pending_keep_bandwidth = False
+        self._pending_symbology_field = ""   # 图层加载完后再还原的设色字段
         self._vector_loads = {}        # seq -> (线程, worker)，持有引用防止在飞任务被 GC
         self.field_info_label = None
         self._chart_window = None
@@ -305,6 +336,7 @@ class WorkbenchPage(QWidget):
         self.result_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.result_table.selectionModel().selectionChanged.connect(self._on_table_selection_changed)
         self.result_table.sourceDropped.connect(self._load_source_table)
+        self.result_table.runDropped.connect(self.runDropped.emit)
         layout.addWidget(self.result_table, 1)
         return container
 
@@ -314,6 +346,7 @@ class WorkbenchPage(QWidget):
         self.map_note = panel.findChild(QLabel, "PanelNote")
         self.map_canvas = MapCanvas()
         self.map_canvas.sourceDropped.connect(self.load_shp)
+        self.map_canvas.runDropped.connect(self.runDropped.emit)
         self.map_canvas.featureClicked.connect(self._on_map_feature_clicked)
         self.map_canvas.rasterLoaded.connect(self._on_map_raster_loaded)
         body.addWidget(self.map_canvas, 1)
@@ -425,6 +458,24 @@ class WorkbenchPage(QWidget):
         panel, body = panel_box("SYMBOLOGY", "分层设色", "分级渲染")
         body.setSpacing(_GAP_ITEM)
 
+        # 配对切换：多字段分析时地图/属性表/带宽着色看的是同一份结果，
+        # 由这一个下拉决定看哪一组配对。只有一个配对时没有必要显示。
+        pair_row = QHBoxLayout()
+        pair_row.setSpacing(_GAP_ITEM)
+        pair_label_widget = QLabel("配对")
+        pair_label_widget.setObjectName("FieldLabel")
+        pair_row.addWidget(pair_label_widget)
+        self.pair_combo = NoWheelComboBox()
+        self.pair_combo.setFixedHeight(_CONTROL_HEIGHT)
+        self._style_combo(self.pair_combo)
+        pair_row.addWidget(self.pair_combo, 1)
+        self.pair_row_widget = QWidget()
+        self.pair_row_widget.setLayout(pair_row)
+        pair_row.setContentsMargins(0, 0, 0, 0)
+        self.pair_row_widget.hide()
+        body.addWidget(self.pair_row_widget)
+        self.pair_combo.currentIndexChanged.connect(self._on_pair_changed)
+
         # 设色字段：标签 + 问号 + 下拉框（一行）
         field_row = QHBoxLayout()
         field_row.setSpacing(_GAP_ITEM)
@@ -481,6 +532,8 @@ class WorkbenchPage(QWidget):
         self.symbology_method_combo.currentTextChanged.connect(self._on_method_changed)
         self.symbology_classes_spin.valueChanged.connect(self._apply_symbology)
         self.manual_breaks_input.editingFinished.connect(self._apply_symbology)
+        # 参数面板先于本面板构建，构建期间 pair_combo 还不存在，这里补一次配对列表
+        self._refresh_pair_options()
         return panel
 
     def _parameter_panel(self):
@@ -529,8 +582,36 @@ class WorkbenchPage(QWidget):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(_GAP_GROUP)
-        self.y_combo = self._add_select(layout, "数据 1")
-        self.x_combo = self._add_select(layout, "数据 2")
+
+        # 字段多选：勾选参与分析的字段，列表顺序决定配对里的 Y / X，
+        # 算法会对全部勾选字段两两配对（C(N,2) 组）一次性算完。
+        self._add_field_label(layout, "分析字段（至少勾选两个）")
+        field_hint = QLabel("两两配对各算一组：靠前的作因变量 Y，靠后的作自变量 X")
+        field_hint.setObjectName("Muted")
+        field_hint.setWordWrap(True)
+        layout.addWidget(field_hint)
+        self.var_list = QListWidget()
+        self.var_list.setMinimumHeight(120)
+        self.var_list.setMaximumHeight(170)
+        self.var_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        layout.addWidget(self.var_list)
+
+        order_row = QHBoxLayout()
+        order_row.setSpacing(_GAP_ITEM)
+        self.var_up_button = QPushButton("↑ 上移")
+        self.var_down_button = QPushButton("↓ 下移")
+        for button in (self.var_up_button, self.var_down_button):
+            button.setObjectName("OutlineButton")
+            button.setFixedHeight(_CONTROL_HEIGHT)
+            order_row.addWidget(button)
+        order_row.addStretch()
+        layout.addLayout(order_row)
+
+        self.pair_preview = QLabel("")
+        self.pair_preview.setObjectName("Muted")
+        self.pair_preview.setWordWrap(True)
+        layout.addWidget(self.pair_preview)
+
         self.kernel_combo = self._add_select(layout, "核函数", ["双平方核", "高斯核", "指数核"])
 
         self._add_field_label(layout, "带宽")
@@ -547,6 +628,10 @@ class WorkbenchPage(QWidget):
         self.bandwidth_mode_combo = self._add_select(layout, "带宽含义", ["最近邻个数", "距离（米）"])
         scroll.setWidget(widget)
         self.attribute_options = scroll
+
+        self.var_list.itemChanged.connect(self._on_variables_changed)
+        self.var_up_button.clicked.connect(lambda: self._move_variable(-1))
+        self.var_down_button.clicked.connect(lambda: self._move_variable(1))
         return scroll
 
     def _raster_options(self):
@@ -706,39 +791,101 @@ class WorkbenchPage(QWidget):
             "symbology_classes": self.symbology_classes_spin.value(),
         }
 
-    def render_scatter_png(self, shp_path, x_field, y_field, out_path):
-        """把 X vs Y 散点图渲染成 PNG 图片，返回是否成功。"""
-        from core.io.readers import read_attributes
+    def render_attribute_figures(self, shp_path, variables, pairs, out_dir, tag=""):
+        """渲染属性分析的图片产物：逐配对散点图 + 多字段散点图矩阵。
+
+        属性表只读一次：DBF 解析耗时与行数成正比，每个配对各读一遍会让出图时间
+        变成 C(N,2) 倍，矩阵再单独读一遍又是两倍。画布上的点按上限等间隔抽样——
+        几十万个 QPointF 的绘制与命中检测都会肉眼可见地卡。
+
+        返回 {"scatter": {配对键: 路径}, "matrix": 矩阵图路径}；矩阵只在选了
+        三个以上字段时生成（两个字段其实就是那张普通散点图）。
+        """
         data = read_attributes(shp_path, limit=0)
         fields = data["fields"]
-        if x_field not in fields or y_field not in fields:
-            return False
-        ix, iy = fields.index(x_field), fields.index(y_field)
-        xs, ys = [], []
-        for row in data["rows"]:
-            x, y = row[ix], row[iy]
-            if x is not None and y is not None and isinstance(x, (int, float)) and isinstance(y, (int, float)):
-                xs.append(x)
-                ys.append(y)
-        if len(xs) < 2:
-            return False
-        canvas = ScatterCanvas()
-        canvas.setStyleSheet("font-size: 18px;")
-        canvas.resize(1400, 1400)
-        canvas.set_data(xs, ys, x_field, y_field)
-        return canvas.grab().save(out_path, "PNG")
+        rows = data["rows"]
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        rendered = {}
+        for y_field, x_field in pairs:
+            if x_field not in fields or y_field not in fields:
+                continue
+            ix, iy = fields.index(x_field), fields.index(y_field)
+            xs, ys = [], []
+            for row in rows:
+                if len(row) <= max(ix, iy):
+                    continue
+                x, y = row[ix], row[iy]
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                    xs.append(x)
+                    ys.append(y)
+            if len(xs) < 2:
+                continue
+            step = max(1, len(xs) // _SCATTER_MAX_POINTS)
+            canvas = ScatterCanvas()
+            canvas.setStyleSheet("font-size: 18px;")
+            canvas.resize(1400, 1400)
+            canvas.set_data(xs[::step], ys[::step], x_field, y_field)
+            key = pair_key(y_field, x_field)
+            name = f"scatter_{tag}_{key}.png" if tag else f"scatter_{key}.png"
+            path = out_dir / name
+            if canvas.grab().save(str(path), "PNG"):
+                rendered[key] = str(path)
+
+        matrix = self._render_attribute_matrix(fields, rows, variables, out_dir, tag)
+        return {"scatter": rendered, "matrix": matrix}
+
+    def _render_attribute_matrix(self, fields, rows, variables, out_dir, tag=""):
+        """多字段散点图矩阵：N×N 一次看完所有字段两两之间的关系。
+
+        与逐配对散点图互补——散点图看的是「某一对差多少」，矩阵看的是「这些数据
+        彼此之间的关系结构」。用的是栅格模式同一套渲染（core/raster_plotting）。
+        """
+        names = [name for name in variables if name in fields]
+        if len(names) < 3:
+            return ""
+        columns = {}
+        for name in names:
+            index = fields.index(name)
+            columns[name] = [row[index] if index < len(row) else None for row in rows]
+        name_part = f"matrix_{tag}.png" if tag else "matrix.png"
+        path = Path(out_dir) / name_part
+        try:
+            from core.raster_plotting import plot_column_matrix
+            ok = plot_column_matrix(
+                columns, path, names,
+                "人口数据散点图矩阵 · 对角线=分布 · 下三角=散点 · 上三角=成对指标",
+            )
+        except Exception:  # noqa: BLE001 - 出图失败不影响分析结果
+            ok = False
+        return str(path) if ok else ""
 
     def restore_run(self, run):
         p = run.parameters
-        # 1. 加载结果 SHP（含结果列，方便分层设色），否则加载源 SHP
-        result_shp = getattr(run.result, "output_shp", "") or ""
+        self.latest_result = run.result
+        # 1. 回填分析字段：多字段按保存顺序勾选，只有旧版单配对参数时退回 x/y 两个
+        variables = p.get("variables") or [
+            v for v in (p.get("dependent_variable"), p.get("independent_variable")) if v
+        ]
+        self._rebuild_variable_list(self._available_fields(variables), variables)
+        self._refresh_pair_preview()
+        # 2. 配对下拉还原（必须在字段列表重建之后，否则选项还不存在）
+        if run.pair_key:
+            index = self.pair_combo.findData(run.pair_key)
+            if index >= 0:
+                self.pair_combo.blockSignals(True)
+                self.pair_combo.setCurrentIndex(index)
+                self.pair_combo.blockSignals(False)
+        # 3. 加载该配对的结果 SHP（含结果列，方便分层设色），否则加载源 SHP
+        result_shp = self._result_shp_for(run.pair_key) or (getattr(run.result, "output_shp", "") or "")
         load_path = result_shp if (result_shp and Path(result_shp).exists()) else run.shp_path
         if load_path:
-            # 下面第 4 步会用 _show_results 填入带结果列的表，这里不要抢先覆盖
-            self.load_shp(load_path, fill_table=False)
-        # 2. 参数面板回填
-        self._set_combo(self.x_combo, p.get("independent_variable", ""))
-        self._set_combo(self.y_combo, p.get("dependent_variable", ""))
+            # 下面第 5 步会用 _show_results 填入带结果列的表，这里不要抢先覆盖。
+            # reset_xy=False：字段选择在上一步已按保存的参数还原好，加载结果 SHP
+            # 不该再按它的字段重建一遍覆盖掉。
+            self.load_shp(load_path, reset_xy=False, fill_table=False)
+        # 4. 其余参数面板回填
         self._set_combo(self.kernel_combo, p.get("kernel", "双平方核"))
         self.bandwidth_input.setText(str(p.get("bandwidth", "25")))
         self.auto_bandwidth.setChecked(bool(p.get("auto_bandwidth", False)))
@@ -751,36 +898,207 @@ class WorkbenchPage(QWidget):
         else:
             self.param_tabs.setCurrentIndex(0)
         self.save_result_shp.setChecked(bool(p.get("write_shp", True)))
-        # 3. 设色还原
+        # 3. 设色还原。设色字段的候选列表要等图层解析完才有，而上面第 3 步的
+        #    load_shp 是后台线程——图层还没加载完时下拉框里根本没有这个字段，
+        #    直接 setCurrentText 会静默失败并回落成默认的 Local_R2。
+        #    所以这里先看能不能立刻设上，设不上就挂起，等加载完再补。
         if run.symbology_field:
-            self._set_combo(self.symbology_field_combo, run.symbology_field)
+            if self.symbology_field_combo.findText(run.symbology_field) >= 0:
+                self.symbology_field_combo.setCurrentText(run.symbology_field)
+            else:
+                self._pending_symbology_field = run.symbology_field
         self._set_combo(self.symbology_method_combo, run.symbology_method)
         self.symbology_classes_spin.setValue(run.symbology_classes)
         self._apply_symbology()
-        # 4. 结果回填属性表
-        self.latest_result = run.result
-        self._result_output_shp = getattr(run.result, "output_shp", "") or ""
-        if run.result.local_columns and run.shp_path:
-            self._show_results(run.shp_path, run.result.local_columns)
+        # 5. 结果回填属性表
+        self._result_output_shp = result_shp or (getattr(run.result, "output_shp", "") or "")
+        self._show_results(run.shp_path, run.result.local_columns, result_shp=result_shp)
         self.tabs.setCurrentIndex(0)
 
-    def _refresh_variable_options(self):
-        """根据已导入数据的字段刷新 Y / X 变量下拉框。"""
+    def _available_fields(self, extra=()):
+        """分析字段候选：已导入数据源的字段并集，外加 extra（历史运行里可能用到、
+        但当前数据源已不再列出的字段，回填时不能丢）。"""
         fields = []
         for source in self.store.sources:
             for field in source.fields:
                 if field not in fields:
                     fields.append(field)
-        if not fields:
-            fields = ["pop2024", "worldpop"]
-        for combo in (self.y_combo, self.x_combo):
-            current = combo.currentText()
+        for field in extra:
+            if field and field not in fields:
+                fields.append(field)
+        return fields
+
+    def _variable_order(self):
+        """字段列表里的全部字段，按列表顺序（含未勾选的）。"""
+        return [self.var_list.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(self.var_list.count())]
+
+    def _selected_variables(self):
+        """已勾选参与分析的字段，按列表顺序——顺序即配对里的因变量→自变量次序。"""
+        return [self.var_list.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(self.var_list.count())
+                if self.var_list.item(i).checkState() == Qt.CheckState.Checked]
+
+    def _rebuild_variable_list(self, fields, selected):
+        """按 fields 重建字段列表；selected 中的字段勾选并排到最前（保持其相对次序）。
+
+        勾选字段前置，是为了让「谁作因变量 Y」在界面上直接可见：列表第一行就是
+        所有配对共用的那个 Y。
+        """
+        selected = [value for value in selected if value in fields]
+        order = selected + [value for value in fields if value not in selected]
+        self.var_list.blockSignals(True)
+        try:
+            self.var_list.clear()
+            for name in order:
+                item = QListWidgetItem(str(name))
+                item.setData(Qt.ItemDataRole.UserRole, name)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked if name in selected else Qt.CheckState.Unchecked)
+                self.var_list.addItem(item)
+        finally:
+            self.var_list.blockSignals(False)
+
+    def _numeric_fields_of_source(self, path):
+        """数据源里的数值字段名：读前若干行按取值类型判断，按路径缓存。
+
+        只读 50 行，代价与文件大小无关；没有这一步，首次进入工作台只能按字段
+        顺序猜，很容易把「name / gb」这类文本字段默认勾上、直接运行就失败。
+        """
+        if path in self._numeric_field_cache:
+            return self._numeric_field_cache[path]
+        numeric = []
+        try:
+            data = read_attributes(path, limit=50)
+            rows = data["rows"]
+            for index, field in enumerate(data["fields"]):
+                values = [row[index] for row in rows
+                          if index < len(row) and row[index] is not None]
+                if values and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                  for v in values):
+                    numeric.append(field)
+        except Exception:  # noqa: BLE001 - 读不到就按无数值字段处理
+            numeric = []
+        self._numeric_field_cache[path] = numeric
+        return numeric
+
+    def _refresh_variable_options(self):
+        """根据已导入数据的字段刷新分析字段列表。"""
+        fields = self._available_fields() or ["pop2024", "worldpop"]
+        selected = self._selected_variables()
+        if not selected:
+            # 默认勾选前两个数值字段，直接点运行也有意义；找不到数值字段时退回前两个
+            preferred = []
+            for source in self.store.sources:
+                preferred = self._numeric_fields_of_source(source.path)
+                if len(preferred) >= 2:
+                    break
+            selected = (preferred or fields)[:2]
+        self._rebuild_variable_list(fields, selected)
+        self._refresh_pair_preview()
+
+    def _on_variables_changed(self, _item=None):
+        """勾选变化：配对集合变了，预览、配对下拉与带宽快照全部作废重来。"""
+        self._refresh_pair_preview()
+        mode = "attribute"
+        self._bandwidth_snapshots.pop(mode, None)
+        self._clear_bandwidth_caches(mode)
+        self._bw_count_cache.clear()
+        metrics = getattr(self, "bw_metrics_label", None)
+        if metrics is not None:
+            metrics.setText("分析字段已变化，请重新生成带宽快照")
+
+    def _move_variable(self, offset):
+        """上下移动选中字段——调换顺序即调换配对里的 Y / X 角色。"""
+        row = self.var_list.currentRow()
+        target = row + offset
+        if row < 0 or not (0 <= target < self.var_list.count()):
+            return
+        item = self.var_list.takeItem(row)
+        self.var_list.insertItem(target, item)
+        self.var_list.setCurrentRow(target)
+        self._on_variables_changed()
+
+    def _refresh_pair_preview(self, *_):
+        variables = self._selected_variables()
+        pairs = attribute_pairs(variables)
+        if len(variables) < 2:
+            self.pair_preview.setText("请至少勾选两个字段")
+        else:
+            text = "、".join(pair_label(y, x) for y, x in pairs)
+            self.pair_preview.setText(f"共 {len(pairs)} 组配对：{text}")
+        self._refresh_pair_options()
+
+    def _refresh_pair_options(self):
+        """按当前勾选的字段重建配对下拉框。"""
+        combo = getattr(self, "pair_combo", None)
+        if combo is None:
+            return
+        pairs = attribute_pairs(self._selected_variables())
+        previous = combo.currentData()
+        combo.blockSignals(True)
+        try:
             combo.clear()
-            combo.addItems(fields)
-            if current:
-                index = combo.findText(current)
+            for y, x in pairs:
+                combo.addItem(pair_label(y, x), pair_key(y, x))
+            if previous:
+                index = combo.findData(previous)
                 if index >= 0:
                     combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)
+        # 只有一组配对时没有可切换的对象，整行藏起来省版面
+        self.pair_row_widget.setVisible(len(pairs) > 1)
+
+    def _current_pair(self):
+        """当前查看的配对键；未选择时回落第一组。"""
+        combo = getattr(self, "pair_combo", None)
+        if combo is not None:
+            key = combo.currentData()
+            if key:
+                return key
+        pairs = attribute_pairs(self._selected_variables())
+        return pair_key(*pairs[0]) if pairs else ""
+
+    def _current_pair_label(self):
+        return self.pair_combo.currentText() if getattr(self, "pair_combo", None) else ""
+
+    def current_pair_key(self):
+        """供主窗口记录到运行快照里的配对键。"""
+        return self._current_pair()
+
+    def _result_shp_for(self, key):
+        """本次运行中某个配对写出的结果 SHP；没有则返回空串。"""
+        return (self.latest_result.shp_by_pair or {}).get(key, "")
+
+    def primary_result_shp(self):
+        """该自动加载到地图的结果 SHP：优先当前配对，其次算法回传的第一组。"""
+        shp = self._result_shp_for(self._current_pair())
+        if shp and Path(shp).exists():
+            return shp
+        return getattr(self.latest_result, "output_shp", "") or ""
+
+    def _on_pair_changed(self, *_):
+        """切换配对：地图与属性表换到该配对的结果 SHP，带宽着色跟着重算。"""
+        if self._current_mode() != "attribute":
+            return
+        key = self._current_pair()
+        if not key:
+            return
+        shp = self._result_shp_for(key)
+        if shp and Path(shp).exists():
+            # 带宽快照是基于源数据、与配对无关，切配对时不能一起清掉
+            self.load_shp(shp, reset_xy=False, fill_table=False, keep_bandwidth=True)
+            self._show_results(self._source_shp_path or shp, None, result_shp=shp)
+        # 带宽配色缓存的键里本来就带配对，各配对互不干扰，切回来还能直接命中
+        mode = "attribute"
+        snapshots = self._bandwidth_snapshots.get(mode)
+        if snapshots:
+            index = self._bandwidth_index(self.bandwidth_slider.value(), mode)
+            if index is not None:
+                self._update_bandwidth_legend(index)
+                self._set_bandwidth_map(index)
+            self._update_metric_line(index if index is not None else 0)
 
     def _refresh_raster_options(self):
         if self.raster_list is None:
@@ -1014,8 +1332,7 @@ class WorkbenchPage(QWidget):
             return parameters or {}
         backend = "栅格 R / terra" if mode == "raster" else "R 属性 GWR"
         parameters = AnalysisParameters(
-            dependent_variable=self.y_combo.currentText(),
-            independent_variable=self.x_combo.currentText(),
+            variables=self._selected_variables(),
             kernel=self.kernel_combo.currentText(),
             bandwidth=self.bandwidth_input.text(),
             bandwidth_mode=self.bandwidth_mode_combo.currentText(),
@@ -1069,11 +1386,13 @@ class WorkbenchPage(QWidget):
             "QPushButton { background: #9aa9a6; color: #ffffff; border: 0; }" if busy else ""
         )
 
-    def load_shp(self, path, reset_xy=True, fill_table=True):
+    def load_shp(self, path, reset_xy=True, fill_table=True, keep_bandwidth=False):
         """把矢量 / 栅格显示到小地图。矢量解析在后台线程进行，不阻塞界面。
 
         fill_table=False 用于「分析完成后自动加载结果 SHP」等场景：属性表此时已由
         _show_results 填好带 GWR 结果列的内容，不应被原始的字段表覆盖。
+        keep_bandwidth=True 用于「切换配对」：换的只是同一份源数据的另一套结果列，
+        带宽快照仍在有效期内，不该被清掉重算。
         """
         suffix = Path(path).suffix.lower()
         if suffix in {".tif", ".tiff", ".img", ".asc"}:
@@ -1083,9 +1402,9 @@ class WorkbenchPage(QWidget):
         if suffix != ".shp":
             self.statusMessage.emit("仅支持 SHP 或栅格（TIF/IMG/ASC）显示")
             return
-        self._start_vector_load(path, reset_xy, fill_table)
+        self._start_vector_load(path, reset_xy, fill_table, keep_bandwidth)
 
-    def _start_vector_load(self, path, reset_xy, fill_table=True):
+    def _start_vector_load(self, path, reset_xy, fill_table=True, keep_bandwidth=False):
         """后台解析矢量后加载到小地图。
 
         栅格转面等来源的 SHP 可达十几万要素，解析 + 建缓存需要数秒；放在工作线程
@@ -1094,6 +1413,7 @@ class WorkbenchPage(QWidget):
         self._vector_load_seq += 1
         self._pending_reset_xy = reset_xy
         self._pending_fill_table = fill_table
+        self._pending_keep_bandwidth = keep_bandwidth
         name = Path(path).name
         self.map_canvas.set_loading(True, f"正在加载矢量：{name}")
         self.statusMessage.emit(f"正在加载矢量：{name}")
@@ -1135,8 +1455,10 @@ class WorkbenchPage(QWidget):
         if self._pending_fill_table:
             # 属性表跟地图走：表行与地图要素一一对应，两者才能按行联动高亮
             self._fill_table_from_map()
-        self._reset_bandwidth_explore()
+        if not self._pending_keep_bandwidth:
+            self._reset_bandwidth_explore()
         self._refresh_symbology_fields()
+        self._apply_pending_symbology_field()
         if self._pending_reset_xy:
             self._refresh_xy_from_map()
         self._refresh_chart_window()
@@ -1223,22 +1545,23 @@ class WorkbenchPage(QWidget):
             self._chart_window.update_data(self._map_fields, self._map_values)
 
     def _refresh_xy_from_map(self):
-        """拖入 SHP 后，把 X/Y 下拉框刷新为该文件的数值字段并自动选择。"""
+        """拖入新 SHP 后，把分析字段列表刷新为该文件的数值字段。
+
+        已勾选的字段只要在新图层里还在就原样保留（含顺序）；只在不足两个时才
+        从数值字段里补够。用户勾了三个字段要跑三组配对，不该因为换一份数据、
+        或某几个字段在新图层里换了写法就悄悄塌成两个。
+        """
         numeric = self._numeric_fields()
         if not numeric:
             return
-        current_y = self.y_combo.currentText()
-        current_x = self.x_combo.currentText()
-        for combo in (self.y_combo, self.x_combo):
-            combo.blockSignals(True)
-        self.y_combo.clear()
-        self.y_combo.addItems(numeric)
-        self.x_combo.clear()
-        self.x_combo.addItems(numeric)
-        self.y_combo.setCurrentText(current_y if current_y in numeric else numeric[0])
-        self.x_combo.setCurrentText(current_x if current_x in numeric else numeric[min(1, len(numeric) - 1)])
-        for combo in (self.y_combo, self.x_combo):
-            combo.blockSignals(False)
+        selected = [value for value in self._selected_variables() if value in numeric]
+        for value in numeric:
+            if len(selected) >= 2:
+                break
+            if value not in selected:
+                selected.append(value)
+        self._rebuild_variable_list(numeric, selected)
+        self._refresh_pair_preview()
 
     def _numeric_fields(self):
         numeric = []
@@ -1254,6 +1577,19 @@ class WorkbenchPage(QWidget):
             numeric = self._numeric_fields()
             return numeric + [f for f in self._map_fields if f not in numeric]
         return self._numeric_fields()
+
+    def _apply_pending_symbology_field(self):
+        """图层加载完成后补一次设色字段还原（见 restore_run 的说明）。
+
+        无论这次能不能设上都要清掉暂存值：换的是另一份数据时该字段本就不存在，
+        留着只会污染下一次加载。
+        """
+        field = self._pending_symbology_field
+        if not field:
+            return
+        self._pending_symbology_field = ""
+        if self.symbology_field_combo.findText(field) >= 0:
+            self.symbology_field_combo.setCurrentText(field)
 
     def _refresh_symbology_fields(self):
         fields = self._symbology_fields()
@@ -1324,7 +1660,8 @@ class WorkbenchPage(QWidget):
         if not field or field not in self._map_values:
             self.field_info_label.set_info("鼠标悬停查看设色字段含义与分级配色说明")
             return
-        meaning, level_hint = FIELD_INFO.get(field, ("该字段暂无说明", "颜色越深代表数值越大"))
+        y, x = parse_pair_key(self._current_pair())
+        meaning, level_hint = pair_field_info(field, y, x)
         values = self._map_values[field]
         if self.symbology_method_combo.currentText() == "唯一值":
             ramp_hint = "类别色板：每个不同取值为一类，颜色之间没有大小含义"
@@ -1427,30 +1764,48 @@ class WorkbenchPage(QWidget):
             self.attr_hint.setText(note)
         self.statusMessage.emit(f"已加载属性表：{note}")
 
-    def _show_results(self, shp_path, result_columns):
-        """把 GWR 结果列追加到原始属性表后展示。"""
-        data = read_attributes(shp_path, limit=_MAP_MAX_RECORDS)
+    # 算法 JSON 回传的结果列 → 属性表列头（仅在拿不到结果 SHP 时使用）
+    _RESULT_COLUMN_SPECS = [
+        ("local_r2", "局部 R²"),
+        ("coefficient", "系数"),
+        ("local_corr", "局部相关系数"),
+        ("lme", "LME"),
+        ("lmae", "LMAE"),
+        ("lmre", "LMRE"),
+        ("lrmse", "LRMSE"),
+    ]
+
+    def _show_results(self, shp_path, result_columns=None, result_shp=""):
+        """把结果列展示到属性表。
+
+        优先直接读结果 SHP：它按原始要素顺序写出、且结果列就在字段里，行序与地图
+        要素严格一致，联动高亮才成立；多字段时每组配对各有自己的结果 SHP，读它
+        也就不必把几百万个数值从算法 JSON 里搬过来。
+        拿不到结果 SHP（未勾选「运行后生成结果 SHP」或写出失败）时，退回
+        「源数据 + 算法回传的结果列」——这条路径只对第一组配对有效。
+        """
+        target = result_shp if (result_shp and Path(result_shp).exists()) else shp_path
+        if not target or not Path(target).exists():
+            return
+        data = read_attributes(target, limit=_MAP_MAX_RECORDS)
         fields = list(data["fields"])
         rows = data["rows"]
-        name = Path(shp_path).stem
         table_columns = columns_from_rows(fields, rows)
-        specs = [
-            ("local_r2", "局部 R²"),
-            ("coefficient", "系数"),
-            ("local_corr", "局部相关系数"),
-            ("lme", "LME"),
-            ("lmae", "LMAE"),
-            ("lmre", "LMRE"),
-            ("lrmse", "LRMSE"),
-        ]
-        for key, label in specs:
-            values = result_columns.get(key)
-            if values is None:
-                continue
-            fields.append(label)
-            table_columns.append([values[i] if i < len(values) else None for i in range(len(rows))])
-        self._fill_table(fields, table_columns,
-                         f"{name}：{len(rows)} 行 · {len(fields)} 字段（含 GWR 结果列）")
+        extra = ""
+        if Path(target) == Path(shp_path) and result_columns:
+            for key, label in self._RESULT_COLUMN_SPECS:
+                values = result_columns.get(key)
+                if values is None:
+                    continue
+                fields.append(label)
+                table_columns.append([values[i] if i < len(values) else None for i in range(len(rows))])
+            extra = "（含 GWR 结果列）"
+        name = Path(target).stem
+        pair = self._current_pair_label()
+        note = f"{name}：{len(rows)} 行 · {len(fields)} 字段{extra}"
+        if pair:
+            note = f"{pair} · {note}"
+        self._fill_table(fields, table_columns, note)
         # 结果 SHP 按原始要素顺序写出，故表行与地图要素仍一一对应
         self._table_linked = True
 
@@ -1547,19 +1902,23 @@ class WorkbenchPage(QWidget):
         return count, f"有效样本 {count:,} 个"
 
     def _valid_sample_count(self, path):
-        """源矢量中 X / Y 均非空的样本数（与 R 脚本 complete.cases 的口径一致）。"""
-        key = (path, self.x_combo.currentText(), self.y_combo.currentText())
+        """源矢量中全部参与字段都非空的样本数（与 R 脚本 complete.cases 的口径一致）。
+
+        多字段时有效样本取的是「全部字段都非空」的交集——各配对共用同一份样本，
+        所以这里必须按全部勾选字段统计，否则带宽滑块 100% 对应的基准会偏大。
+        """
+        variables = tuple(self._selected_variables())
+        key = (path, variables)
         if key in self._bw_count_cache:
             return self._bw_count_cache[key]
         data = read_attributes(path, limit=0)
         fields = data["fields"]
-        x_field, y_field = key[1], key[2]
-        if x_field in fields and y_field in fields:
-            first, second = fields.index(x_field), fields.index(y_field)
-            limit = max(first, second)
+        indexes = [fields.index(name) for name in variables if name in fields]
+        if indexes:
+            widest = max(indexes)
             count = sum(
                 1 for row in data["rows"]
-                if len(row) > limit and row[first] is not None and row[second] is not None
+                if len(row) > widest and all(row[i] is not None for i in indexes)
             )
         else:
             count = data["row_count"]
@@ -1707,28 +2066,25 @@ class WorkbenchPage(QWidget):
 
     def _run_attribute_bandwidth_snapshots(self):
         path = self.source_vector_path()
-        y = self.y_combo.currentText()
-        x = self.x_combo.currentText()
+        variables = self._selected_variables()
         if not path:
             self.statusMessage.emit("请先拖入 SHP 数据到地图")
             return
-        if not y or not x:
-            self.statusMessage.emit("请选择数据 1 和数据 2")
-            return
-        if y == x:
-            self.statusMessage.emit("数据 1 和数据 2 不能是同一字段")
+        if len(variables) < 2:
+            self.statusMessage.emit("请至少勾选两个分析字段")
             return
         config = {
             "shp_path": path,
-            "dependent_variable": y,
-            "independent_variable": x,
+            "variables": variables,
             "kernel": self.kernel_combo.currentText(),
             "bandwidth_mode": self.bandwidth_mode_combo.currentText(),
             "bandwidths": self._bandwidth_sequence(),
         }
         runner = RRunner(self._bandwidth_script, self._rscript_path)
-        self._start_bandwidth_worker(runner, config, "attribute",
-                                     f"正在计算 {len(config['bandwidths'])} 个带宽…")
+        pairs = attribute_pairs(variables)
+        self._start_bandwidth_worker(
+            runner, config, "attribute",
+            f"正在计算 {len(config['bandwidths'])} 个带宽 × {len(pairs)} 组配对…")
 
     def _run_raster_bandwidth_snapshots(self):
         paths = self._selected_raster_paths()
@@ -1814,27 +2170,29 @@ class WorkbenchPage(QWidget):
             self.statusMessage.emit(result.get("message", "带宽快照生成失败") if result else "带宽快照生成失败")
             return
         bandwidths = [int(b) for b in result.get("bandwidths", [])]
-        curve = result.get("curve", [])
         if mode == "raster":
-            raw = {"local_mae": result.get("local_mae", []), "previews": result.get("previews", [])}
-            empty = not bandwidths or len(raw["local_mae"]) != len(bandwidths)
+            curves = {"": result.get("curve", [])}
+            raws = {"": {"local_mae": result.get("local_mae", []),
+                         "previews": result.get("previews", [])}}
+            probe = "local_mae"
         elif mode == "geometry":
-            raw = {"gw_iou": result.get("gw_iou", [])}
-            empty = not bandwidths or len(raw["gw_iou"]) != len(bandwidths)
+            curves = {"": result.get("curve", [])}
+            raws = {"": {"gw_iou": result.get("gw_iou", [])}}
+            probe = "gw_iou"
         else:
-            raw = {
-                "local_r2": result.get("local_r2", []),
-                "coefficient": result.get("coefficient", []),
-                "local_corr": result.get("local_corr", []),
-                "lme": result.get("lme", []),
-                "lmae": result.get("lmae", []),
-                "lmre": result.get("lmre", []),
-                "lrmse": result.get("lrmse", []),
-                "residual": result.get("residual", []),
-                "stud_residual": result.get("stud_residual", []),
-            }
-            empty = not bandwidths or len(raw["local_r2"]) != len(bandwidths)
-        if empty:
+            # 多字段：算法按配对返回 by_pair；旧版单配对输出没有 by_pair，这里补成
+            # 唯一的空键，后面所有按配对取数的逻辑对两种形状都成立。
+            by_pair = result.get("by_pair") or {"": result}
+            curves, raws = {}, {}
+            for key, entry in by_pair.items():
+                curves[key] = entry.get("curve", [])
+                raws[key] = {name: entry.get(name, []) for name in _BW_SERIES}
+            probe = "local_r2"
+            if not any(raws[key].get(probe) for key in raws):
+                self.bw_status.setText("带宽快照结果为空")
+                self.statusMessage.emit("带宽快照结果为空")
+                return
+        if not bandwidths or not any(curves.values()):
             self.bw_status.setText("带宽快照结果为空")
             self.statusMessage.emit("带宽快照结果为空")
             return
@@ -1843,11 +2201,13 @@ class WorkbenchPage(QWidget):
         percents = [by_value.get(value, value) for value in bandwidths]
         self._bandwidth_snapshots[mode] = {
             "mode": mode, "percents": percents, "bandwidths": bandwidths,
-            "curve": curve, "raw": raw,
+            "curves": curves, "raw": raws, "probe": probe,
         }
         self._clear_bandwidth_caches(mode)
         self._on_bandwidth_slider_changed(self.bandwidth_slider.value(), auto_generate=False)
-        self.bw_status.setText(f"已生成 {len(bandwidths)} 个带宽快照，拖动滑块查看地图变化")
+        pair_note = f"，{len(curves)} 组配对" if mode == "attribute" else ""
+        self.bw_status.setText(
+            f"已生成 {len(bandwidths)} 个带宽快照{pair_note}，拖动滑块查看地图变化")
         self.statusMessage.emit(result.get("message", "带宽快照已生成"))
 
     def _on_bandwidth_slider_changed(self, value, auto_generate=True):
@@ -1885,10 +2245,42 @@ class WorkbenchPage(QWidget):
         # 滑块百分比通常落在两个取值之间，取最近的一档
         return min(range(len(percents)), key=lambda i: abs(percents[i] - percent))
 
+    def _bw_pair(self, mode=None):
+        """带宽探索当前查看的配对键。
+
+        栅格 / 几何模式没有配对概念，统一用空串做键，这样「按配对取曲线」的逻辑
+        对三种模式是同一条路径；属性模式下若快照里没有当前配对（例如刚改过字段
+        选择还没重新生成），退回快照里的第一组。
+        """
+        mode = mode or self._current_mode()
+        snapshots = self._bandwidth_snapshots.get(mode)
+        if mode != "attribute":
+            return ""
+        key = self._current_pair()
+        if snapshots and key in (snapshots.get("curves") or {}):
+            return key
+        keys = list((snapshots.get("curves") or {}).keys()) if snapshots else []
+        return keys[0] if keys else key
+
+    def _bw_curve(self, mode=None):
+        """当前配对在每条带宽上的指标曲线点。"""
+        mode = mode or self._current_mode()
+        snapshots = self._bandwidth_snapshots.get(mode) or {}
+        return (snapshots.get("curves") or {}).get(self._bw_pair(mode), [])
+
+    def _bw_raw(self, mode=None):
+        """当前配对的逐要素序列：指标名 → [每条带宽一个逐要素列表]。"""
+        mode = mode or self._current_mode()
+        snapshots = self._bandwidth_snapshots.get(mode) or {}
+        return (snapshots.get("raw") or {}).get(self._bw_pair(mode), {})
+
+    def _bw_cache_key(self, field):
+        """带宽配色的缓存键。配对不同值也不同，必须进键，否则切配对会串色。"""
+        return (self._current_mode(), self._bw_pair(), field)
+
     def _update_metric_line(self, index):
         mode = self._current_mode()
-        snapshots = self._bandwidth_snapshots.get(mode)
-        curve = snapshots.get("curve", []) if snapshots else []
+        curve = self._bw_curve(mode)
         if not (0 <= index < len(curve)):
             return
         item = curve[index]
@@ -1938,8 +2330,7 @@ class WorkbenchPage(QWidget):
 
     def _best_bandwidth(self):
         mode = self._current_mode()
-        snapshots = self._bandwidth_snapshots.get(mode)
-        curve = snapshots.get("curve", []) if snapshots else []
+        curve = self._bw_curve(mode)
         key, higher_better = {
             "attribute": ("aicc", False),
             "raster": ("rmse", False),
@@ -1961,7 +2352,7 @@ class WorkbenchPage(QWidget):
         field = self._bw_field()
         self._colors_for(field)  # 确保配色/图例缓存已计算
         clear_layout(legend_layout)
-        entries = self._bandwidth_legend_cache.get((self._current_mode(), field), [])
+        entries = self._bandwidth_legend_cache.get(self._bw_cache_key(field), [])
         if not (0 <= index < len(entries)):
             return
         labels, colors = entries[index]
@@ -1990,12 +2381,15 @@ class WorkbenchPage(QWidget):
         return _BANDWIDTH_FIELD_MAP.get(self.symbology_field_combo.currentText(), "local_r2")
 
     def _colors_for(self, field):
-        """返回某展示参数在每个带宽下的逐要素配色（惰性计算并缓存）。"""
+        """返回某展示参数在每个带宽下的逐要素配色（惰性计算并缓存）。
+
+        缓存键含配对：同一个指标字段在不同配对下是两套完全不同的值。
+        """
         mode = self._current_mode()
-        key = (mode, field)
+        key = self._bw_cache_key(field)
         if key not in self._bandwidth_color_cache:
             snapshots = self._bandwidth_snapshots.get(mode)
-            raw = (snapshots or {}).get("raw", {}).get(field, [])
+            raw = self._bw_raw(mode).get(field, [])
             n_bands = len((snapshots or {}).get("bandwidths", []))
             if not raw:
                 self._bandwidth_color_cache[key] = [[]] * n_bands
@@ -2079,6 +2473,9 @@ class WorkbenchPage(QWidget):
     def update_result(self, result: AnalysisResult, shp_path=None):
         self.set_run_busy(False)
         self.latest_result = result
+        if shp_path:
+            # 结果 SHP 不可用时退回读源数据，这里记下它
+            self._source_shp_path = shp_path
         if self._current_mode() == "geometry":
             if result.status == "error":
                 self.geometry_validation_label.setText("计算失败：" + result.message)
@@ -2090,9 +2487,15 @@ class WorkbenchPage(QWidget):
                 self.geometry_validation_label.setStyleSheet(
                     "padding: 7px; color: #1f695e; background: #e3f3ef; border-radius: 4px;"
                 )
+        # 多字段运行：配对下拉按本次结果的配对重建
+        if result.pairs:
+            self._refresh_pair_options()
         self._result_output_shp = getattr(result, "output_shp", "") or ""
-        if shp_path and result.status == "success" and result.local_columns:
-            self._show_results(shp_path, result.local_columns)
+        # 内容判断而非模式判断：栅格 / 几何结果既没有结果 SHP 也没有结果列，
+        # 不能把属性表顶到前台盖掉它们各自的展示。
+        if result.status == "success" and (self.primary_result_shp() or result.local_columns):
+            self._show_results(self._source_shp_path, result.local_columns,
+                               result_shp=self.primary_result_shp())
             self.tabs.setCurrentIndex(1)
         self.statusMessage.emit(result.message)
 

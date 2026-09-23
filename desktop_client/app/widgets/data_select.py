@@ -19,6 +19,10 @@ from ..qt_compat import (
 from .panels import clear_layout
 
 MIME_SOURCE_PATH = "application/x-spatial-source"
+# 拖「项目」（一次运行的结果）时额外带上它在项目列表里的序号。两者都拖到地图上，
+# 但语义完全不同：拖数据源是「换一份数据看」，拖项目是「切回那次分析」。
+# 接收端只认路径的话就分不出来，会把切项目当成换数据、顺手清掉用户的参数设置。
+MIME_RUN_INDEX = "application/x-spatial-run-index"
 
 
 class DraggableSourceLabel(QLabel):
@@ -65,6 +69,7 @@ class ClickableRunLabel(QLabel):
         self._shp_path = shp_path
         self._drag_start = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("点击切换 · 双击重命名 · 拖拽到地图切换到这个项目")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -94,6 +99,8 @@ class ClickableRunLabel(QLabel):
         drag = QDrag(self)
         mime = QMimeData()
         mime.setData(MIME_SOURCE_PATH, self._shp_path.encode("utf-8"))
+        # 同时带上项目序号：接收端据此区分「切项目」和「换数据源」
+        mime.setData(MIME_RUN_INDEX, str(self._index).encode("utf-8"))
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.CopyAction)
 
@@ -258,7 +265,6 @@ class DataSelectionPanel(QWidget):
             row.addWidget(marker)
             drag_path = getattr(run.result, "output_shp", "") or run.shp_path
             name = ClickableRunLabel(run.name, i, drag_path)
-            name.setToolTip("点击切换 · 双击重命名 · 拖拽到地图显示")
             if i == self._current_index:
                 name.setStyleSheet("font-weight: 700; color: #1e655b;")
             name.clicked.connect(self._on_run_clicked)

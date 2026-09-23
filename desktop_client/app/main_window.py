@@ -34,7 +34,7 @@ from .theme import APP_STYLE
 from .widgets import DataSelectionPanel
 from core.engine import AnalysisEngine
 from core.io.exporters import export_report
-from core.models import AnalysisResult, AnalysisRun
+from core.models import AnalysisResult, AnalysisRun, attribute_pairs, pair_key
 from core.project import ProjectStore
 from core.raster_processing import RasterPreprocessor
 
@@ -171,6 +171,8 @@ class SpatialValidationWindow(QMainWindow):
     def _connect_signals(self):
         self.workbench_page.runRequested.connect(self.run_analysis)
         self.workbench_page.resultDirectoryRequested.connect(self._open_result_directory)
+        # 把项目拖到地图/属性表 = 点它一下：切项目走同一条路径，参数与配对设置一并还原
+        self.workbench_page.runDropped.connect(self._switch_run)
         self.data_panel.statusMessage.connect(self.set_status)
         self.data_page.statusMessage.connect(self.set_status)
         self.data_page.navigationRequested.connect(self.navigate)
@@ -301,21 +303,43 @@ class SpatialValidationWindow(QMainWindow):
             self.set_status(f"分析失败：{result.message}")
         else:
             self._add_run(result)
-            # 自动加载结果 SHP 到地图，方便直接分层设色查看
-            output_shp = getattr(result, "output_shp", "") or ""
+            # 自动加载当前配对的结果 SHP 到地图，方便直接分层设色查看。
+            # 多字段时由工作台按配对下拉的当前选择决定加载哪一份。
+            output_shp = self.workbench_page.primary_result_shp()
             if output_shp and Path(output_shp).exists():
-                # 属性表已由 _show_results 填入带 GWR 结果列的内容，别被原始字段表覆盖
-                self.workbench_page.load_shp(output_shp, reset_xy=True, fill_table=False)
+                # 属性表已由 _show_results 填入带 GWR 结果列的内容，别被原始字段表覆盖。
+                # reset_xy=False：结果 SHP 就是本次分析源数据的副本，字段和源数据一样，
+                # 按它重建分析字段选择只会把用户刚勾好的字段悄悄改掉（结果 SHP 里的列名
+                # 还可能被 sf 改写过，重建后配对会从几组塌成一组、配对下拉直接消失）。
+                self.workbench_page.load_shp(output_shp, reset_xy=False, fill_table=False)
             self.set_status(f"分析完成：{result.engine}")
 
     def _render_scatter_for_result(self, result):
-        x = self.latest_parameters.get("independent_variable", "")
-        y = self.latest_parameters.get("dependent_variable", "")
-        if not (x and y and self._last_analysis_shp_path):
+        """为每个配对渲染 X vs Y 散点图。
+
+        属性表读取（十来万行的 DBF 解析）只做一次，全部配对复用同一份列数据；
+        画布上的点也按上限抽样，避免 18 万个点拖满出图时间。
+        """
+        variables = self.latest_parameters.get("variables") or [
+            v for v in (self.latest_parameters.get("dependent_variable"),
+                        self.latest_parameters.get("independent_variable")) if v
+        ]
+        pairs = attribute_pairs(variables)
+        if not pairs or not self._last_analysis_shp_path:
             return
-        out_path = self.engine.project_dir / ".runtime" / f"scatter_{len(self.runs) + 1}.png"
-        if self.workbench_page.render_scatter_png(self._last_analysis_shp_path, x, y, str(out_path)):
-            result.artifacts["scatter"] = str(out_path)
+        out_dir = self.engine.project_dir / ".runtime" / "scatter"
+        rendered = self.workbench_page.render_attribute_figures(
+            self._last_analysis_shp_path, variables, pairs, out_dir,
+            tag=f"run{len(self.runs) + 1}")
+        scatters = rendered.get("scatter") or {}
+        # 多配对统一用「配对键__名称」，与算法侧的图表产物同一套拼法；
+        # 第一组再额外写一份无前缀的旧键名，兼容单配对时代的取图逻辑。
+        for key, path in scatters.items():
+            result.artifacts[f"{key}__scatter"] = path
+        result.artifacts["scatter"] = scatters.get(pair_key(*pairs[0]), "")
+        if rendered.get("matrix"):
+            # 矩阵是整个运行共用一张，不按配对分
+            result.artifacts["scatter_matrix"] = rendered["matrix"]
 
     @Slot()
     def _analysis_thread_finished(self):
@@ -349,12 +373,18 @@ class SpatialValidationWindow(QMainWindow):
             self.set_status(f"报告已导出：{Path(path).name}")
 
     def _add_run(self, result):
-        y = self.latest_parameters.get("dependent_variable", "")
-        x = self.latest_parameters.get("independent_variable", "")
+        variables = self.latest_parameters.get("variables") or [
+            v for v in (self.latest_parameters.get("dependent_variable"),
+                        self.latest_parameters.get("independent_variable")) if v
+        ]
+        pairs = attribute_pairs(variables)
         if self.latest_parameters.get("analysis_type") == "raster":
             name = f"栅格分析 · #{len(self.runs) + 1}"
-        elif y and x:
-            name = f"{y} vs {x} · #{len(self.runs) + 1}"
+        elif len(pairs) > 1:
+            # 字段多时把配对全部铺进项目名会撑爆列表，只留字段数说明
+            name = f"{len(variables)} 个字段 · {len(pairs)} 组配对 · #{len(self.runs) + 1}"
+        elif pairs:
+            name = f"{pairs[0][0]} ~ {pairs[0][1]} · #{len(self.runs) + 1}"
         else:
             name = f"分析 · #{len(self.runs) + 1}"
         sym = self.workbench_page.get_symbology_state()
@@ -366,6 +396,7 @@ class SpatialValidationWindow(QMainWindow):
             symbology_field=sym["symbology_field"],
             symbology_method=sym["symbology_method"],
             symbology_classes=sym["symbology_classes"],
+            pair_key=self.workbench_page.current_pair_key(),
         )
         self.runs.append(run)
         self.data_panel.set_runs(self.runs, len(self.runs) - 1)

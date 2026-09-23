@@ -63,11 +63,12 @@ def build_report_text(result: dict, parameters: dict) -> str:
         if _is_present(value):
             lines.append(f"- {key}: {_format_report_value(value)}")
 
+    # 属性 GWR 与栅格分析都用这套两两比较结构，标题不能再写死「栅格」
     pairwise_metrics = result.get("pairwise_metrics") or {}
     if pairwise_metrics:
-        lines.extend(["", "## 栅格两两比较", ""])
+        lines.extend(["", "## 两两比较", ""])
         for pair_name, values in pairwise_metrics.items():
-            lines.append(f"### {pair_name}")
+            lines.append(f"### {(values or {}).get('label') or pair_name}")
             for key, value in (values or {}).items():
                 if _is_present(value):
                     lines.append(f"- {key}: {_format_report_value(value)}")
@@ -75,7 +76,7 @@ def build_report_text(result: dict, parameters: dict) -> str:
 
     local_statistics = result.get("local_statistics") or {}
     if local_statistics:
-        lines.extend(["## 栅格局部指标统计", ""])
+        lines.extend(["## 局部指标统计", ""])
         for pair_name, statistics in local_statistics.items():
             rows = []
             for key, label in _RASTER_STAT_LABELS.items():
@@ -84,8 +85,9 @@ def build_report_text(result: dict, parameters: dict) -> str:
                     rows.append((label, values))
             if not rows:
                 continue
+            label = (pairwise_metrics.get(pair_name) or {}).get("label") or pair_name
             lines.extend([
-                f"### {pair_name}",
+                f"### {label}",
                 "",
                 "| 局部指标 | 有效数 | 最小值 | Q1 | 中位数 | Q3 | 最大值 | 均值 | 标准差 |",
                 "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

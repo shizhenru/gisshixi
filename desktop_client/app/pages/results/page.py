@@ -29,7 +29,12 @@ from ...qt_compat import (
 )
 from ...widgets import MetricCard, panel_box
 from core.io.exporters import build_report_text
-from core.models import AnalysisResult
+from core.models import AnalysisResult, pair_label, parse_pair_key
+
+
+# 「输出文件」列表最多铺开的条数。多字段分析时每个配对各出 5 张图 + 1 份 SHP，
+# 六组就是三十多条，全列出来只会把报告面板挤爆。
+_ARTIFACT_PREVIEW = 8
 
 
 class ClickableImageLabel(QLabel):
@@ -175,6 +180,12 @@ class ResultsPage(QWidget):
         self.local_specs = []
         self.local_labels = {}
         self.local_summary_panel = None
+        self.pair_combo = None
+        self.pair_row_widget = None
+        self._metric_names = {}
+        self.matrix_label = None
+        self.matrix_tab_index = -1
+        self._matrix_path = ""
         self.geometry_table_combo = None
         self.geometry_image_labels = {}
         self.geometry_tab_indices = []
@@ -211,6 +222,22 @@ class ResultsPage(QWidget):
         identity_grid.setSpacing(8)
         self.raster_identity_layout = identity_grid
         body.addLayout(identity_grid)
+
+        # 多字段分析：全局/局部卡与图表都跟随这个下拉显示的配对切换。
+        # 项目整体对比走「总体对比」页签，这里只负责「当前看的是哪一组」。
+        pair_row = QHBoxLayout()
+        pair_row.setSpacing(8)
+        pair_row.addWidget(QLabel("当前配对"))
+        self.pair_combo = QComboBox()
+        self.pair_combo.setMinimumWidth(260)
+        self.pair_combo.currentIndexChanged.connect(self._on_result_pair_changed)
+        pair_row.addWidget(self.pair_combo)
+        pair_row.addStretch()
+        self.pair_row_widget = QWidget()
+        self.pair_row_widget.setLayout(pair_row)
+        pair_row.setContentsMargins(0, 0, 0, 0)
+        self.pair_row_widget.setVisible(False)
+        body.addWidget(self.pair_row_widget)
         # 用网格而非单行：8 张卡一行放不下会被右边缘截断，这里每行 4 张自动换行
         # （与下面「局部统计摘要」的排法保持一致）
         grid = QGridLayout()
@@ -337,6 +364,24 @@ class ResultsPage(QWidget):
             self.chart_tabs.setTabVisible(index, False)
             self.geometry_tab_indices.append(index)
             self.geometry_image_labels[key] = image_label
+
+        # 散点图矩阵（属性选 3 个以上字段时生成）：N×N 一次看完所有字段两两之间
+        # 的关系，和栅格模式的像元散点图矩阵是同一套读法。页签建在几何页签之后，
+        # 免得打乱上面按下标控制可见性的那批几何页签。
+        matrix_page = QWidget()
+        matrix_layout = QVBoxLayout(matrix_page)
+        matrix_layout.setContentsMargins(8, 8, 8, 8)
+        self.matrix_label = ClickableImageLabel("选择三个以上字段分析后，这里会显示散点图矩阵")
+        self.matrix_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.matrix_label.setMinimumSize(640, 570)
+        self.matrix_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.matrix_label.setStyleSheet(
+            "background: #ffffff; border: 1px solid #dfe8e6; border-radius: 6px;"
+        )
+        self.matrix_label.doubleClicked.connect(self._open_matrix_preview)
+        matrix_layout.addWidget(self.matrix_label)
+        self.matrix_tab_index = self.chart_tabs.addTab(matrix_page, "散点图矩阵")
+        self.chart_tabs.setTabVisible(self.matrix_tab_index, False)
         layout.addWidget(self.chart_tabs)
         return panel
 
@@ -371,6 +416,10 @@ class ResultsPage(QWidget):
         attribute_titles = ["R²", "调整 R²", "AICc", "最优带宽", "ME", "MAE", "RMSE", "相关系数"]
         geometry_titles = ["类别数", "候选对", "推荐阈值", "推荐阈值匹配对"]
         titles = geometry_titles if is_geometry else raster_titles if is_raster else attribute_titles
+        # 必须先清空再重建：同一批卡片在不同模式下标题不同，只增不减的话
+        # 「R²」和「ME」会同时指向 0 号卡，后写入的键把前面的值覆盖成「—」
+        # （栅格模式下 ME/MAE/MRE/RMSE 四张卡因此一直显示「—」）。
+        self.metric_cards = {}
         for index, card in enumerate(self.metric_card_widgets):
             card.setVisible(not is_raster and index < len(titles))
             if index < len(titles):
@@ -378,21 +427,19 @@ class ResultsPage(QWidget):
                 self.metric_cards[titles[index]] = card
         # 属性模式的四张卡（R² / 调整 R² / AICc / 最优带宽）此前没有映射，
         # 导致算法返回了值、界面上却一直显示「—」。多余键在其它模式下取不到卡片、会被跳过。
-        metric_names = {
+        self._metric_names = {
             "ME": "me", "MAE": "mae", "MRE": "mre", "RMSE": "rmse",
             "相关系数": "correlation", "有效像元": "valid_cells",
             "R²": "r2", "调整 R²": "adj_r2", "AICc": "aicc", "最优带宽": "bandwidth",
         }
         if is_geometry:
-            metric_names = {
+            self._metric_names = {
                 "类别数": "categories", "候选对": "candidate_pairs",
                 "推荐阈值": "recommended_threshold", "推荐阈值匹配对": "matched_pairs",
             }
-        for title, key in metric_names.items():
-            card = self.metric_cards.get(title)
-            if card is not None:
-                value = result.metrics.get(key, result.metrics.get(title, "—"))
-                card.update_value(value, result.engine)
+        # 配对下拉要在填指标之前建好，否则第一组会先按空值渲染一遍
+        self._refresh_pair_choices(result)
+        self._apply_pair_metrics()
         self.local_summary_panel.setVisible(not is_geometry and not is_raster)
         self._refresh_raster_identity_cards(result, is_raster)
         title = self.global_panel.findChild(QLabel, "PanelTitle")
@@ -401,9 +448,6 @@ class ResultsPage(QWidget):
             title.setText("影像编号" if is_raster else "全局模型摘要")
         if kicker is not None:
             kicker.setText("RASTER INPUTS" if is_raster else "GLOBAL MODEL")
-        for key, (label, prefix) in self.local_labels.items():
-            value = result.metrics.get(key, "—")
-            label.setText(str(value))
         self._set_geometry_mode(is_geometry, is_raster)
         if is_geometry:
             self._refresh_geometry_table_choices(result)
@@ -412,21 +456,25 @@ class ResultsPage(QWidget):
             self._refresh_raster_pair_tables(result)
             self._refresh_pairwise_table(result)
         else:
+            self._refresh_raster_pair_tables(result)
             self._refresh_pairwise_table(result)
-        self._scatter_path = result.artifacts.get(
-            "raster_scatter_matrix",
-            result.artifacts.get("scatter", result.artifacts.get("raster_scatter", "")),
-        )
         self._refresh_scatter_image()
         self._refresh_figure_tabs(result)
+        self._refresh_matrix_image(result, is_raster, is_geometry)
         if self._scatter_preview is not None and self._scatter_preview.isVisible():
             self._scatter_preview.set_image(self._scatter_path)
-        artifact_paths = list(result.artifacts.values())
+        artifact_paths = [path for path in result.artifacts.values() if path]
         if artifact_paths:
             # .shp 也要列出来：属性 GWR 的主要产物就是结果 SHP，此前被后缀白名单滤掉了
             visible_paths = [path for path in artifact_paths
                              if Path(path).suffix.lower() in {".png", ".csv", ".json", ".md", ".tif", ".tiff", ".shp"}]
-            self.artifacts_text.setText("输出文件：\n" + "\n".join(visible_paths))
+            # 多字段时每个配对各一套产物，几十条路径全铺出来没法看，
+            # 只列前若干条并给出总数，完整清单留在结果目录里
+            shown = visible_paths[:_ARTIFACT_PREVIEW]
+            text = "输出文件：\n" + "\n".join(shown)
+            if len(visible_paths) > len(shown):
+                text += f"\n… 共 {len(visible_paths)} 个文件，完整清单见结果目录"
+            self.artifacts_text.setText(text)
         elif result.output_dir:
             self.artifacts_text.setText(f"输出目录：{result.output_dir}")
         report_path = result.artifacts.get("report", "") if is_geometry else ""
@@ -451,6 +499,75 @@ class ResultsPage(QWidget):
                     "output_dir": result.output_dir or "—",
                 },
             ))
+
+    # ------------------------------------------------------------------ #
+    # 多字段：当前配对
+    # ------------------------------------------------------------------ #
+    def _refresh_pair_choices(self, result):
+        """按结果里的配对填充下拉框；只有一组配对（或没有配对信息）时整行隐藏。"""
+        entries = [(item.get("key", ""), item.get("label") or item.get("key", ""))
+                   for item in (result.pairs or []) if item.get("key")]
+        if not entries and result.metrics_by_pair:
+            entries = [(key, pair_label(*parse_pair_key(key)) or key)
+                       for key in result.metrics_by_pair]
+        previous = self.pair_combo.currentData()
+        self.pair_combo.blockSignals(True)
+        try:
+            self.pair_combo.clear()
+            for key, label in entries:
+                self.pair_combo.addItem(label, key)
+            if previous:
+                index = self.pair_combo.findData(previous)
+                if index >= 0:
+                    self.pair_combo.setCurrentIndex(index)
+        finally:
+            self.pair_combo.blockSignals(False)
+        self.pair_row_widget.setVisible(len(entries) > 1)
+
+    def current_pair_key(self):
+        if self.pair_combo.count() == 0:
+            return ""
+        return self.pair_combo.currentData() or ""
+
+    def _pair_metrics(self):
+        """当前配对的全局/局部指标；单配对（或栅格、几何）时就是 result.metrics。"""
+        key = self.current_pair_key()
+        if key:
+            values = (self.result.metrics_by_pair or {}).get(key)
+            if values:
+                return values
+        return self.result.metrics
+
+    def _apply_pair_metrics(self):
+        """把当前配对的指标填进全局卡与局部卡。切换配对时重跑这一段即可。"""
+        metrics = self._pair_metrics()
+        for title, key in (self._metric_names or {}).items():
+            card = self.metric_cards.get(title)
+            if card is not None:
+                card.update_value(metrics.get(key, metrics.get(title, "—")), self.result.engine)
+        for key, (label, _prefix) in self.local_labels.items():
+            label.setText(str(metrics.get(key, "—")))
+
+    def _on_result_pair_changed(self, *_):
+        if not self.result:
+            return
+        self._apply_pair_metrics()
+        self._refresh_scatter_image()
+        self._refresh_figure_tabs(self.result)
+
+    def _pair_artifact(self, name):
+        """取当前配对的产物路径。
+
+        多配对统一走「配对键__名称」；单配对（以及栅格、几何）回落到不含前缀的
+        旧键名，让旧结果文件和既有调用不受影响。
+        """
+        artifacts = self.result.artifacts or {}
+        key = self.current_pair_key()
+        if key:
+            path = artifacts.get(f"{key}__{name}", "")
+            if path and Path(path).exists():
+                return path
+        return artifacts.get(name, "")
 
     def _set_geometry_mode(self, enabled, is_raster=False):
         self.geometry_table_combo.setVisible(enabled)
@@ -501,9 +618,11 @@ class ResultsPage(QWidget):
             "lrmse": "LRMSE",
         }
         headers = ["局部指标", "有效数", "最小值", "Q1", "中位数", "Q3", "最大值", "均值", "标准差"]
-        for pair_key, statistics in result.local_statistics.items():
-            left, _, right = pair_key.partition("__vs__")
-            title = f"{name_labels.get(left, left)}-{name_labels.get(right, right)}"
+        for pair_name, statistics in result.local_statistics.items():
+            left, right = parse_pair_key(pair_name)
+            # 栅格模式用「影像 A-B」的编号，属性模式直接用「Y ~ X」的配对名
+            title = (f"{name_labels.get(left, left)}-{name_labels.get(right, right)}"
+                     if name_labels else pair_label(left, right))
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(8, 8, 8, 8)
@@ -623,9 +742,13 @@ class ResultsPage(QWidget):
         self.pairwise_table.setSortingEnabled(True)
 
     def _refresh_figure_tabs(self, result):
-        """把属性 GWR 生成的图件填进对应页签；其它模式没有这些产物则提示未生成。"""
+        """把属性 GWR 生成的图件填进对应页签。
+
+        多字段时图件按配对各出一套，页签本身不随配对增删（否则十几个配对会撑出
+        几十个页签），内容跟随上面的「当前配对」下拉切换。
+        """
         for key, label in self.figure_labels.items():
-            path = result.artifacts.get(key, "")
+            path = self._pair_artifact(key)
             self._figure_paths[key] = path
             self._set_image_label(label, path, "本次分析未生成该图件")
 
@@ -660,6 +783,30 @@ class ResultsPage(QWidget):
             return
         label.setText("")
         label.setPixmap(pixmap.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
+    def _refresh_matrix_image(self, result, is_raster=False, is_geometry=False):
+        """属性多字段的散点图矩阵：没有产物就整条页签藏起来，不留空页签。"""
+        self._matrix_path = result.artifacts.get("scatter_matrix", "") if not is_raster else ""
+        path = self._matrix_path if (self._matrix_path and Path(self._matrix_path).exists()) else ""
+        self.chart_tabs.setTabVisible(self.matrix_tab_index, bool(path) and not is_geometry)
+        if path:
+            self._set_image_label(self.matrix_label, path, "")
+        else:
+            self.matrix_label.setPixmap(QPixmap())
+            self.matrix_label.setText("选择三个以上字段分析后，这里会显示散点图矩阵")
+
+    def _open_matrix_preview(self):
+        path = self._matrix_path
+        if not path or not Path(path).exists():
+            return
+        if self._scatter_preview is None:
+            self._scatter_preview = ScatterPreviewDialog(path, self)
+        else:
+            self._scatter_preview.set_image(path)
+        self._scatter_preview.setWindowTitle("散点图矩阵预览")
+        self._scatter_preview.show()
+        self._scatter_preview.raise_()
+        self._scatter_preview.activateWindow()
 
     def _open_geometry_preview(self, key):
         path = self._geometry_paths.get(key, "")
@@ -725,6 +872,11 @@ class ResultsPage(QWidget):
     def _refresh_scatter_image(self):
         if not self.scatter_label:
             return
+        # 散点图由主窗口按配对各渲染一张，这里按当前配对取；其它模式走产物键
+        self._scatter_path = self._pair_artifact("scatter") or self.result.artifacts.get(
+            "raster_scatter_matrix",
+            self.result.artifacts.get("raster_scatter", ""),
+        )
         if not self._scatter_path or not Path(self._scatter_path).exists():
             self.scatter_label.setPixmap(QPixmap())
             self.scatter_label.setText("本次分析没有生成散点图")
@@ -759,3 +911,5 @@ class ResultsPage(QWidget):
             self._set_image_label(label, self._figure_paths.get(key, ""), "本次分析未生成该图件")
         for key, label in self.geometry_image_labels.items():
             self._set_image_label(label, self._geometry_paths.get(key, ""), "本次分析未生成该图件")
+        if self._matrix_path and Path(self._matrix_path).exists():
+            self._set_image_label(self.matrix_label, self._matrix_path, "")

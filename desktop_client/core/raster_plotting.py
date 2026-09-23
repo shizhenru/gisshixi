@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 
 
@@ -10,28 +11,84 @@ LINE_COLOR = "#A83232"
 TEXT_COLOR = "#9C4A4A"
 KDE_COLOR = "#A99B7C"
 
+# 散点图矩阵的点数上限：N 个变量要画 C(N,2) 个子图，每个子图都铺几十万个点会让
+# 出图时间以分钟计。矩阵看的是分布形态与相关性，等间隔抽样不影响判读。
+MATRIX_MAX_POINTS = 20000
+
+# 常见的中文字体候选。matplotlib 默认的 DejaVu Sans 没有汉字字形，
+# 字段名或标题带中文时会渲染成一排方框，同时刷几十条 Glyph missing 警告。
+_CJK_FONTS = (
+    "Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "Source Han Sans SC",
+    "PingFang SC", "Hiragino Sans GB", "WenQuanYi Zen Hei",
+)
+
+
+def _use_cjk_font(matplotlib) -> bool:
+    """挑一个系统里有的中文字体给 matplotlib 用；都找不到就维持默认（英文图仍正常）。"""
+    from matplotlib import font_manager
+
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for name in _CJK_FONTS:
+        if name in available:
+            matplotlib.rcParams["font.sans-serif"] = [
+                name, *matplotlib.rcParams["font.sans-serif"]
+            ]
+            # 中文字体的 U+2212 减号常常缺字形，会让负号变成方块，改用 ASCII 减号
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            return True
+    return False
+
 
 def plot_scatter_matrix(data_path: Path, output_path: Path, names: list[str]) -> bool:
+    """栅格像元散点图矩阵：从 CSV 按列读入后出图（栅格模式入口）。"""
+    rows = []
+    try:
+        with Path(data_path).open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                try:
+                    rows.append([float(row[name]) for name in names])
+                except (KeyError, TypeError, ValueError):
+                    continue
+    except OSError:
+        return False
+    if len(rows) < 3:
+        return False
+    columns = {name: [row[index] for row in rows] for index, name in enumerate(names)}
+    return plot_column_matrix(columns, output_path, names, "Raster pixel scatterplot matrix")
+
+
+def plot_column_matrix(columns: dict, output_path: Path, names: list[str],
+                       title: str, max_points: int = MATRIX_MAX_POINTS) -> bool:
+    """N×N 散点图矩阵：对角线直方图、下三角散点、上三角成对指标。
+
+    栅格模式（像元值）与属性模式（要素字段）共用这一套出图口径，两个结果页的
+    矩阵因此长得一样、读法也一样。columns 为 {名称: 数值列表}，缺失值填 None。
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
+        _use_cjk_font(matplotlib)
         import matplotlib.pyplot as plt
         import numpy as np
     except ImportError:
         return False
-
-    rows = []
-    with data_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            try:
-                rows.append([float(row[name]) for name in names])
-            except (KeyError, TypeError, ValueError):
-                continue
-    if len(rows) < 3 or len(names) < 2:
+    if len(names) < 2:
         return False
 
-    values = np.asarray(rows, dtype=float)
+    series = [
+        [float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else math.nan
+         for v in (columns.get(name) or [])]
+        for name in names
+    ]
+    length = min((len(item) for item in series), default=0)
+    if length < 3:
+        return False
+    values = np.asarray([item[:length] for item in series], dtype=float).T
+    if max_points and len(values) > max_points:
+        step = len(values) / max_points
+        values = values[np.unique((np.arange(max_points) * step).astype(int))]
+
     size = max(8.0, min(16.0, 2.8 * len(names)))
     figure, axes = plt.subplots(len(names), len(names), figsize=(size, size), squeeze=False)
     for row_index, y_name in enumerate(names):
@@ -55,7 +112,7 @@ def plot_scatter_matrix(data_path: Path, output_path: Path, names: list[str]) ->
             else:
                 axis.tick_params(labelleft=False)
             axis.tick_params(labelsize=7, colors="#4A4A4A")
-    figure.suptitle("Raster pixel scatterplot matrix", fontsize=14)
+    figure.suptitle(title, fontsize=14)
     figure.tight_layout()
     figure.savefig(output_path, dpi=160, bbox_inches="tight")
     plt.close(figure)

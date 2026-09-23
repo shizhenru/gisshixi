@@ -18,7 +18,7 @@ from ..qt_compat import (
     Signal,
     Slot,
 )
-from .data_select import MIME_SOURCE_PATH
+from .data_select import MIME_RUN_INDEX, MIME_SOURCE_PATH
 from .raster_preview import RasterLoadWorker
 from .vector_render import build_polygon_path, decimate_ring
 
@@ -33,7 +33,8 @@ _VECTOR_CACHE_HEADROOM = 1.5
 class MapCanvas(QWidget):
     """地图画布：加载真实几何数据时渲染矢量要素；未加载时显示空白占位。"""
 
-    sourceDropped = Signal(str)
+    sourceDropped = Signal(str)   # 拖入数据源：换一份数据看
+    runDropped = Signal(int)      # 拖入项目：切换回那次分析（保留其参数与配对设置）
     featureClicked = Signal(int)
     rasterLoaded = Signal(str)
 
@@ -460,18 +461,30 @@ class MapCanvas(QWidget):
             super().mouseDoubleClickEvent(event)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(MIME_SOURCE_PATH):
+        if (event.mimeData().hasFormat(MIME_SOURCE_PATH)
+                or event.mimeData().hasFormat(MIME_RUN_INDEX)):
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat(MIME_SOURCE_PATH):
+        if (event.mimeData().hasFormat(MIME_SOURCE_PATH)
+                or event.mimeData().hasFormat(MIME_RUN_INDEX)):
             event.acceptProposedAction()
         else:
             super().dragMoveEvent(event)
 
     def dropEvent(self, event):
+        # 拖「项目」优先按切项目处理：它是「切回那次分析」，不是「换一份数据看」，
+        # 走成后者会把用户选好的分析字段与配对设置一起清掉。
+        if event.mimeData().hasFormat(MIME_RUN_INDEX):
+            raw = bytes(event.mimeData().data(MIME_RUN_INDEX)).decode("utf-8")
+            try:
+                self.runDropped.emit(int(raw))
+            except ValueError:
+                pass
+            event.acceptProposedAction()
+            return
         if event.mimeData().hasFormat(MIME_SOURCE_PATH):
             path = bytes(event.mimeData().data(MIME_SOURCE_PATH)).decode("utf-8")
             self.sourceDropped.emit(path)

@@ -327,3 +327,25 @@ FIELD_INFO = {
     "gb": ("行政区划代码", "文本字段"),
     "Province_n": ("所属省份", "文本字段"),
 }
+
+# 多字段分析时，结果 SHP 里 7 个结果列在每组配对下含义不同（Coeff 是「本组 Y 对 X」的
+# 斜率、LME 是「本组 Y - X」的空间分布……）。字段名本身不带配对信息，所以这里按
+# 「当前配对」现场拼出说明，避免用户把另一组的解读套到这一组上。
+_PAIR_FIELD_INFO = {
+    "Local_R2": ("局部 R²（拟合优度）", "越接近 1 表示 {pair} 的局部拟合越好"),
+    "Coeff": ("GWR 斜率系数", "{y} 每变 1 单位、{x} 变化多少；约等于 1 表示两者一致"),
+    "Corr": ("局部相关系数", "越接近 1 表示 {x} 与 {y} 的局部相关性越强"),
+    "LME": ("局部平均误差（{y} - {x}）", "正值（红）= {y} 高于 {x}；负值（蓝）= {y} 低于 {x}"),
+    "LMAE": ("局部平均绝对误差", "{pair} 的局部绝对差异，值越大差异越大"),
+    "LMRE": ("局部平均相对误差", "相对 {x} 的误差比例，值越大差异越大"),
+    "LRMSE": ("局部均方根误差", "{pair} 的局部均方根误差，对大误差更敏感"),
+}
+
+
+def pair_field_info(field_name, y="", x=""):
+    """结果列的悬停说明；带配对上下文时把 Y / X 与配对名填进去。"""
+    if y and x and field_name in _PAIR_FIELD_INFO:
+        meaning, hint = _PAIR_FIELD_INFO[field_name]
+        context = {"y": y, "x": x, "pair": f"{y} ~ {x}"}
+        return (meaning.format(**context), hint.format(**context))
+    return FIELD_INFO.get(field_name, ("该字段暂无说明", "颜色越深代表数值越大"))

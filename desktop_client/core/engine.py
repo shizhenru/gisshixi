@@ -9,14 +9,28 @@ from .models import AnalysisResult
 
 
 def _attribute_artifacts(payload: dict) -> dict:
-    """属性 GWR 的产物清单：结果 SHP + 各类图表路径。"""
+    """属性 GWR 的产物清单：结果 SHP + 各类图表路径。
+
+    多字段时算法为每个配对各写一份结果 SHP 与一套图，这里按「配对键__名称」
+    展平成一张表；第一对的产物同时保留旧的无前缀键名，供既有界面逻辑使用。
+    """
     artifacts = {}
+    shp_by_pair = payload.get("shp_by_pair") or {}
+    for key, path in shp_by_pair.items():
+        if path:
+            artifacts[f"result_shp__{key}"] = path
     if payload.get("output_shp"):
         artifacts["result_shp"] = payload["output_shp"]
-    figures = payload.get("figures") or {}
-    for name, path in figures.items():
-        if path:
-            artifacts[name] = path
+    figures_by_pair = payload.get("figures_by_pair") or {}
+    for key, figures in figures_by_pair.items():
+        for name, path in (figures or {}).items():
+            if path:
+                artifacts[f"{key}__{name}"] = path
+    if not figures_by_pair:
+        # 单配对（旧版算法输出）没有 figures_by_pair，按无前缀的旧键名收
+        for name, path in (payload.get("figures") or {}).items():
+            if path:
+                artifacts[name] = path
     return artifacts
 
 
@@ -84,6 +98,14 @@ class AnalysisEngine:
                 output_dir=payload.get("output_dir") or str(output_path.parent),
                 # 结果 SHP 与四张图都算产物：前者列为「输出文件」，后者填进图表页签
                 artifacts=_attribute_artifacts(payload),
+                # 每个配对的全局指标与局部指标统计：「总体对比」表与逐配对统计页签要用
+                pairwise_metrics=payload.get("pairwise_metrics", {}),
+                local_statistics=payload.get("local_statistics", {}),
+                # 多字段两两配对的产出（单字段时代为空列表/空表，界面按单配对处理）
+                pairs=payload.get("pairs", []),
+                metrics_by_pair=payload.get("metrics_by_pair", {}),
+                shp_by_pair=payload.get("shp_by_pair", {}),
+                figures_by_pair=payload.get("figures_by_pair", {}),
             )
         except Exception as exc:
             return AnalysisResult(
